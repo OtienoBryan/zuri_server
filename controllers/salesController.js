@@ -43,62 +43,129 @@ exports.getAllRoutes = async (req, res) => {
 // Get all sales reps
 exports.getAllSalesReps = async (req, res) => {
   try {
-    const [rows] = await db.query('SELECT * FROM SalesRep ORDER BY name');
+    const [rows] = await db.query(`
+      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
+      FROM SalesRep s
+      ORDER BY s.name ASC
+    `);
     res.json(rows);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch sales reps', details: err.message });
+    console.error('Get all sales reps error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch sales reps', 
+      error: err.message 
+    });
   }
 };
 
 // Create a new sales rep
 exports.createSalesRep = async (req, res) => {
   const { name, email, phoneNumber, country, region, route, photo } = req.body;
+  
+  console.log('Create Sales Rep - Received data:', {
+    name, email, phoneNumber, country, region, route, photo
+  });
+  
+  // Validate required fields
+  if (!name || !email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Name and email are required' 
+    });
+  }
+  
   try {
+    // Check if email already exists
+    const [existing] = await db.query('SELECT id FROM SalesRep WHERE email = ?', [email]);
+    if (existing.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email already exists' 
+      });
+    }
+    
     const [result] = await db.query(
-      'INSERT INTO SalesRep (name, email, phone, country, region, route_name_update, photoUrl) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [name, email, phoneNumber, country, region, route, photo]
+      'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())',
+      [name, email, phoneNumber, country, region, route || '', photo]
     );
+    
+    // Fetch the created sales rep with proper field mapping
+    const [newRep] = await db.query(`
+      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
+      FROM SalesRep s
+      WHERE s.id = ?
+    `, [result.insertId]);
+    
     res.status(201).json({ 
-      id: result.insertId, 
-      name, 
-      email, 
-      phoneNumber, 
-      country, 
-      region, 
-      route, 
-      photo 
+      success: true,
+      message: 'Sales representative created successfully',
+      data: newRep[0]
     });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to create sales rep', details: err.message });
+    console.error('Create sales rep error:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to create sales rep', 
+      error: err.message 
+    });
   }
 };
 
 // Update a sales rep
 exports.updateSalesRep = async (req, res) => {
   const { id } = req.params;
-  const { name, email, phone, country, region, route_name_update, photoUrl } = req.body;
-  console.log('Update Sales Rep called');
-  console.log('Params id:', id);
-  console.log('Body:', req.body);
+  const { name, email, phoneNumber, country, region, route_name_update, photoUrl } = req.body;
+  
+  console.log('Update Sales Rep - Received data:', {
+    id, name, email, phoneNumber, country, region, route_name_update, photoUrl
+  });
+  
+  // Validate required fields
+  if (!name || !email) {
+    return res.status(400).json({ 
+      success: false, 
+      message: 'Name and email are required' 
+    });
+  }
+  
   try {
-    console.log('SQL params:', [name, email, phone, country, region, route_name_update, photoUrl, id]);
+    // Check if email already exists for another sales rep
+    const [existing] = await db.query('SELECT id FROM SalesRep WHERE email = ? AND id != ?', [email, id]);
+    if (existing.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Email already exists for another sales rep' 
+      });
+    }
+    
     await db.query(
-      'UPDATE SalesRep SET name = ?, email = ?, phoneNumber = ?, country = ?, region = ?, route_name_update = ?, photoUrl = ? WHERE id = ?',
-      [name, email, phone, country, region, route_name_update, photoUrl, id]
+      'UPDATE SalesRep SET name = ?, email = ?, phoneNumber = ?, country = ?, region = ?, route_name_update = ?, photoUrl = ?, updatedAt = NOW() WHERE id = ?',
+      [name, email, phoneNumber, country, region, route_name_update || '', photoUrl, id]
     );
+    
+    // Fetch the updated sales rep with proper field mapping
+    const [updatedRep] = await db.query(`
+      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
+      FROM SalesRep s
+      WHERE s.id = ?
+    `, [id]);
+    
     res.json({ 
-      id, 
-      name, 
-      email, 
-      phone, 
-      country, 
-      region, 
-      route_name_update, 
-      photoUrl 
+      success: true,
+      message: 'Sales representative updated successfully',
+      data: updatedRep[0]
     });
   } catch (err) {
     console.error('Error updating sales rep:', err);
-    res.status(500).json({ error: 'Failed to update sales rep', details: err.message });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to update sales rep', 
+      error: err.message 
+    });
   }
 };
 
