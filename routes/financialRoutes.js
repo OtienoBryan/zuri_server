@@ -335,6 +335,28 @@ router.delete('/price-options/:id', deleteCategoryPriceOption);
 
 router.get('/sales-reps', getSalesReps);
 
+// Regions Route
+router.get('/regions', async (req, res) => {
+  try {
+    const [regions] = await db.query('SELECT id, name as region_name FROM Regions ORDER BY name ASC');
+    res.json({ success: true, data: regions });
+  } catch (error) {
+    console.error('Error fetching regions:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch regions' });
+  }
+});
+
+// Cylinder Codes Route
+router.get('/cylinder-codes', async (req, res) => {
+  try {
+    const [cylinderCodes] = await db.query('SELECT id, code FROM cylinder_codes ORDER BY code ASC');
+    res.json({ success: true, data: cylinderCodes });
+  } catch (error) {
+    console.error('Error fetching cylinder codes:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch cylinder codes' });
+  }
+});
+
 // Credit Notes Routes
 router.get('/credit-notes', creditNoteController.getAllCreditNotes);
 router.get('/credit-notes/:id', creditNoteController.getCreditNoteById);

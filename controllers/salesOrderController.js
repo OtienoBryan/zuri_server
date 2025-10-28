@@ -800,26 +800,191 @@ const salesOrderController = {
 
   // Assign a rider to a sales order
   assignRider: async (req, res) => {
+    const connection = await db.getConnection();
+    
     try {
+      await connection.beginTransaction();
+      
       const { id } = req.params;
-      const { riderId } = req.body;
+      const { riderId, regionId, cylinderCodeId } = req.body;
+      
       if (!riderId) {
         return res.status(400).json({ success: false, error: 'riderId is required' });
       }
-      // Check if sales order exists
-      const [existingSO] = await db.query('SELECT id FROM sales_orders WHERE id = ?', [id]);
+      
+      if (!regionId) {
+        return res.status(400).json({ success: false, error: 'regionId is required' });
+      }
+      
+      if (!cylinderCodeId) {
+        return res.status(400).json({ success: false, error: 'cylinderCodeId is required' });
+      }
+      
+      // Check if sales order exists and get its details
+      const [existingSO] = await connection.query(
+        'SELECT id, so_number, my_status FROM sales_orders WHERE id = ?', 
+        [id]
+      );
+      
       if (existingSO.length === 0) {
+        await connection.rollback();
         return res.status(404).json({ success: false, error: 'Sales order not found' });
       }
+      
+      const salesOrder = existingSO[0];
+      
+      // Check if inventory has already been reduced (order status >= 2 means rider already assigned)
+      if (salesOrder.my_status >= 2) {
+        await connection.rollback();
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Inventory has already been reduced for this order' 
+        });
+      }
+      
+      // Get all items for this sales order
+      const [orderItems] = await connection.query(
+        `SELECT soi.product_id, soi.quantity, soi.unit_price, p.cost_price, p.product_name
+         FROM sales_order_items soi
+         JOIN products p ON soi.product_id = p.id
+         WHERE soi.sales_order_id = ?`,
+        [id]
+      );
+      
+      if (orderItems.length === 0) {
+        await connection.rollback();
+        return res.status(400).json({ success: false, error: 'No items found for this order' });
+      }
+      
+      // Always deduct from store 1 (default warehouse)
+      const storeId = 1;
+      
+      // Verify sufficient inventory for all items
+      for (const item of orderItems) {
+        const [inventory] = await connection.query(
+          'SELECT quantity FROM store_inventory WHERE store_id = ? AND product_id = ?',
+          [storeId, item.product_id]
+        );
+        
+        if (inventory.length === 0 || inventory[0].quantity < item.quantity) {
+          await connection.rollback();
+          return res.status(400).json({ 
+            success: false, 
+            error: `Insufficient inventory for product: ${item.product_name}. Available: ${inventory.length > 0 ? inventory[0].quantity : 0}, Required: ${item.quantity}` 
+          });
+        }
+      }
+      
+      // Process inventory reduction for each item
+      let totalCOGS = 0;
+      
+      for (const item of orderItems) {
+        const { product_id, quantity, cost_price, product_name } = item;
+        const unitCost = parseFloat(cost_price) || 0;
+        const totalCost = unitCost * quantity;
+        totalCOGS += totalCost;
+        
+        // Reduce inventory
+        await connection.query(
+          `UPDATE store_inventory 
+           SET quantity = quantity - ?, 
+               updated_at = CURRENT_TIMESTAMP 
+           WHERE store_id = ? AND product_id = ?`,
+          [quantity, storeId, product_id]
+        );
+        
+        // Get the new balance after reduction
+        const [currentInventory] = await connection.query(
+          'SELECT quantity FROM store_inventory WHERE store_id = ? AND product_id = ?',
+          [storeId, product_id]
+        );
+        const newBalance = currentInventory.length > 0 ? currentInventory[0].quantity : 0;
+        
+        // Record inventory transaction (outgoing)
+        const reference = salesOrder.so_number || `SO-${id}`;
+        await connection.query(
+          `INSERT INTO inventory_transactions 
+           (product_id, reference, amount_in, amount_out, unit_cost, total_cost, balance, date_received, store_id, staff_id)
+           VALUES (?, ?, 0, ?, ?, ?, ?, NOW(), ?, ?)`,
+          [product_id, reference, quantity, unitCost, totalCost, newBalance, storeId, req.user?.id || 1]
+        );
+        
+        console.log(`✅ Inventory reduced for ${product_name}: -${quantity} units, New balance: ${newBalance}`);
+      }
+      
+      // Create COGS journal entry
+      if (totalCOGS > 0) {
+        // Get required accounts
+        const [costOfGoodsAccount] = await connection.query(
+          "SELECT id FROM accounts WHERE code = '500000' LIMIT 1"
+        );
+        const [inventoryAccount] = await connection.query(
+          "SELECT id FROM accounts WHERE code = '100001' LIMIT 1"
+        );
+        
+        if (costOfGoodsAccount.length > 0 && inventoryAccount.length > 0) {
+          const journalEntryNumber = `JE-DISP-${id}-${Date.now()}`;
+          
+          const [journalResult] = await connection.query(
+            `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
+             VALUES (?, NOW(), ?, ?, ?, ?, 'posted', ?)`,
+            [
+              journalEntryNumber,
+              salesOrder.so_number || `SO-${id}`,
+              `Inventory dispatch for order ${salesOrder.so_number || id}`,
+              totalCOGS,
+              totalCOGS,
+              req.user?.id || 1
+            ]
+          );
+          
+          const journalEntryId = journalResult.insertId;
+          
+          // Debit Cost of Goods Sold
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+             VALUES (?, ?, ?, 0, ?)`,
+            [journalEntryId, costOfGoodsAccount[0].id, totalCOGS, `COGS - ${salesOrder.so_number || id}`]
+          );
+          
+          // Credit Inventory
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+             VALUES (?, ?, 0, ?, ?)`,
+            [journalEntryId, inventoryAccount[0].id, totalCOGS, `Inventory reduction - ${salesOrder.so_number || id}`]
+          );
+          
+          console.log(`✅ COGS journal entry created: ${journalEntryNumber}, Total COGS: ${totalCOGS}`);
+        } else {
+          console.warn('⚠️ Required accounts not found for COGS journal entry (code: 500000 or 100001)');
+        }
+      }
+      
       // Get the current user ID from the request
-      const currentUserId = req.user?.id || 1; // Default to user ID 1 if not available
-      // Update the sales order with the rider ID, set my_status to 2, assigned_at to now, and dispatched_by to current user
+      const currentUserId = req.user?.id || 1;
+      
+      // Update the sales order with the rider ID, region ID, cylinder code ID, set my_status to 2, assigned_at to now, and dispatched_by to current user
       const now = new Date();
-      await db.query('UPDATE sales_orders SET rider_id = ?, my_status = 2, assigned_at = ?, dispatched_by = ? WHERE id = ?', [riderId, now, currentUserId, id]);
-      res.json({ success: true, message: 'Rider assigned successfully' });
+      await connection.query(
+        'UPDATE sales_orders SET rider_id = ?, region_id = ?, cylinder_code_id = ?, my_status = 2, assigned_at = ?, dispatched_by = ? WHERE id = ?', 
+        [riderId, regionId, cylinderCodeId, now, currentUserId, id]
+      );
+      
+      await connection.commit();
+      console.log(`✅ Rider assigned successfully to order ${salesOrder.so_number || id}. Inventory reduced.`);
+      
+      res.json({ 
+        success: true, 
+        message: 'Rider assigned successfully and inventory reduced',
+        totalCOGS: totalCOGS 
+      });
+      
     } catch (error) {
+      await connection.rollback();
       console.error('Error assigning rider:', error);
-      res.status(500).json({ success: false, error: 'Failed to assign rider' });
+      res.status(500).json({ success: false, error: 'Failed to assign rider: ' + error.message });
+    } finally {
+      connection.release();
     }
   },
 
@@ -1077,64 +1242,73 @@ const salesOrderController = {
       }
       
       // Calculate total cost of goods sold and create COGS journal entry
+      // NOTE: Skip COGS creation if inventory was already reduced when rider was assigned (my_status >= 2)
       let totalCOGS = 0;
-      for (const item of items) {
-        // Get product cost price
-        const [productResult] = await connection.query(
-          'SELECT cost_price FROM products WHERE id = ?',
-          [item.product_id]
-        );
-        if (productResult.length > 0) {
-          const costPrice = parseFloat(productResult[0].cost_price);
-          totalCOGS += item.quantity * costPrice;
+      
+      if (originalOrder.my_status < 2) {
+        // Inventory hasn't been reduced yet, so we need to create COGS entry
+        console.log('Order has not been dispatched yet (my_status < 2), calculating COGS for invoice conversion');
+        
+        for (const item of items) {
+          // Get product cost price
+          const [productResult] = await connection.query(
+            'SELECT cost_price FROM products WHERE id = ?',
+            [item.product_id]
+          );
+          if (productResult.length > 0) {
+            const costPrice = parseFloat(productResult[0].cost_price);
+            totalCOGS += item.quantity * costPrice;
+          }
         }
-      }
-      
-      console.log('Total COGS calculated:', totalCOGS);
-      
-      // Create COGS journal entry if COGS > 0 and accounts exist
-      if (totalCOGS > 0 && costOfGoodsAccount.length && inventoryAccount.length) {
-        console.log('Creating COGS journal entry');
         
-        const [cogsJournalResult] = await connection.query(
-          `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, 'posted', ?)`,
-          [
-            `JE-COGS-${id}-${Date.now()}`,
-            originalOrder.order_date,
-            `INV-${id}`,
-            `Cost of goods sold for invoice INV-${id}`,
-            totalCOGS,
-            totalCOGS,
-            currentUserId
-          ]
-        );
-        const cogsJournalEntryId = cogsJournalResult.insertId;
-        console.log('COGS journal entry created with ID:', cogsJournalEntryId);
+        console.log('Total COGS calculated:', totalCOGS);
         
-        // Debit Cost of Goods Sold
-        await connection.query(
-          `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
-           VALUES (?, ?, ?, 0, ?)`,
-          [cogsJournalEntryId, costOfGoodsAccount[0].id, totalCOGS, `COGS - Invoice INV-${id}`]
-        );
-        
-        // Credit Inventory
-        await connection.query(
-          `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
-           VALUES (?, ?, 0, ?, ?)`,
-          [cogsJournalEntryId, inventoryAccount[0].id, totalCOGS, `Inventory reduction - Invoice INV-${id}`]
-        );
-        
-        console.log('COGS journal entry created successfully');
-      } else {
-        if (totalCOGS === 0) {
-          console.log('No COGS to record (total COGS = 0)');
+        // Create COGS journal entry if COGS > 0 and accounts exist
+        if (totalCOGS > 0 && costOfGoodsAccount.length && inventoryAccount.length) {
+          console.log('Creating COGS journal entry for non-dispatched order');
+          
+          const [cogsJournalResult] = await connection.query(
+            `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
+             VALUES (?, ?, ?, ?, ?, ?, 'posted', ?)`,
+            [
+              `JE-COGS-${id}-${Date.now()}`,
+              originalOrder.order_date,
+              `INV-${id}`,
+              `Cost of goods sold for invoice INV-${id}`,
+              totalCOGS,
+              totalCOGS,
+              currentUserId
+            ]
+          );
+          const cogsJournalEntryId = cogsJournalResult.insertId;
+          console.log('COGS journal entry created with ID:', cogsJournalEntryId);
+          
+          // Debit Cost of Goods Sold
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+             VALUES (?, ?, ?, 0, ?)`,
+            [cogsJournalEntryId, costOfGoodsAccount[0].id, totalCOGS, `COGS - Invoice INV-${id}`]
+          );
+          
+          // Credit Inventory
+          await connection.query(
+            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
+             VALUES (?, ?, 0, ?, ?)`,
+            [cogsJournalEntryId, inventoryAccount[0].id, totalCOGS, `Inventory reduction - Invoice INV-${id}`]
+          );
+          
+          console.log('COGS journal entry created successfully');
         } else {
-          console.error('Required COGS accounts not found for journal entry creation');
-          console.error('COGS Account (code: 500000):', costOfGoodsAccount);
-          console.error('Inventory Account (code: 100001):', inventoryAccount);
+          if (totalCOGS === 0) {
+            console.log('No COGS to record (total COGS = 0)');
+          } else {
+            console.error('Required COGS accounts not found for journal entry creation');
+            console.error('COGS Account (code: 500000):', costOfGoodsAccount);
+            console.error('Inventory Account (code: 100001):', inventoryAccount);
+          }
         }
+      } else {
+        console.log('⏭️ Skipping COGS journal entry - inventory was already reduced when rider was assigned (my_status >= 2)');
       }
       
       await connection.commit();
