@@ -31,6 +31,8 @@ const salesOrderController = {
         SELECT 
           so.*, 
           c.name as customer_name, 
+          c.phone as customer_phone,
+          c.address as customer_address,
           c.balance as customer_balance,
           u.full_name as created_by_name,
           sr.name as salesrep
@@ -55,7 +57,8 @@ const salesOrderController = {
             soi.*, 
             p.product_name, 
             p.product_code, 
-            p.unit_of_measure
+            p.unit_of_measure,
+            p.cylinder_type
           FROM sales_order_items soi
           LEFT JOIN products p ON soi.product_id = p.id
           WHERE soi.sales_order_id = ?
@@ -72,11 +75,13 @@ const salesOrderController = {
           tax_type: item.tax_type,
           tax_amount: parseFloat(item.tax_amount),
           net_price: parseFloat(item.net_price),
+          order_notes: item.order_notes,
           product: {
             id: item.product_id,
             product_name: item.product_name || `Product ${item.product_id}`,
             product_code: item.product_code || 'No Code',
-            unit_of_measure: item.unit_of_measure || 'PCS'
+            unit_of_measure: item.unit_of_measure || 'PCS',
+            cylinder_type: item.cylinder_type
           }
         }));
       }
@@ -116,6 +121,8 @@ const salesOrderController = {
         SELECT 
           so.*, 
           c.name as customer_name, 
+          c.phone as customer_phone,
+          c.address as customer_address,
           c.balance as customer_balance,
           c.client_type,
           oc.name as client_type_name,
@@ -149,7 +156,8 @@ const salesOrderController = {
             soi.*, 
             p.product_name, 
             p.product_code, 
-            p.unit_of_measure
+            p.unit_of_measure,
+            p.cylinder_type
           FROM sales_order_items soi
           LEFT JOIN products p ON soi.product_id = p.id
           WHERE soi.sales_order_id = ?
@@ -166,11 +174,13 @@ const salesOrderController = {
           tax_type: item.tax_type,
           tax_amount: parseFloat(item.tax_amount),
           net_price: parseFloat(item.net_price),
+          order_notes: item.order_notes,
           product: {
             id: item.product_id,
             product_name: item.product_name || `Product ${item.product_id}`,
             product_code: item.product_code || 'No Code',
-            unit_of_measure: item.unit_of_measure || 'PCS'
+            unit_of_measure: item.unit_of_measure || 'PCS',
+            cylinder_type: item.cylinder_type
           }
         }));
       }
@@ -217,7 +227,8 @@ const salesOrderController = {
           soi.*, 
           p.product_name, 
           p.product_code, 
-          p.unit_of_measure
+          p.unit_of_measure,
+          p.cylinder_type
         FROM sales_order_items soi
         LEFT JOIN products p ON soi.product_id = p.id
         WHERE soi.sales_order_id = ?
@@ -230,11 +241,13 @@ const salesOrderController = {
         total_price: parseFloat(item.total_price),
         tax_amount: parseFloat(item.tax_amount),
         net_price: parseFloat(item.net_price),
+        order_notes: item.order_notes,
         product: {
           id: item.product_id,
           product_name: item.product_name,
           product_code: item.product_code,
-          unit_of_measure: item.unit_of_measure
+          unit_of_measure: item.unit_of_measure,
+          cylinder_type: item.cylinder_type
         }
       }));
       // Construct customer object
@@ -269,18 +282,7 @@ const salesOrderController = {
       console.log('Order date:', order_date);
       console.log('Items:', JSON.stringify(items, null, 2));
       
-      // Validate that client exists
-      console.log('Checking if client exists...');
-      const [clientCheck] = await connection.query('SELECT id FROM Clients WHERE id = ?', [clientId]);
-      console.log('Client check result:', clientCheck);
-      if (clientCheck.length === 0) {
-        console.log('Client not found, returning error');
-        return res.status(400).json({ 
-          success: false, 
-          error: `Client with ID ${clientId} not found` 
-        });
-      }
-      console.log('Client validation passed');
+      // Client validation removed - orders can be created without checking client exists
       
       // Use client_id directly since sales_orders table uses client_id
       const clientIdToUse = clientId;
@@ -380,6 +382,8 @@ const salesOrderController = {
         console.log('Product check result:', productCheck);
         if (productCheck.length === 0) {
           console.log('Product not found, returning error');
+          await connection.rollback();
+          connection.release();
           return res.status(400).json({ 
             success: false, 
             error: `Product with ID ${item.product_id} not found` 
@@ -408,18 +412,20 @@ const salesOrderController = {
         
         await connection.query(`
           INSERT INTO sales_order_items (
-            sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice]);
+            sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice, item.order_notes || null]);
       }
       console.log('All items created, committing transaction...');
       await connection.commit();
       console.log('Transaction committed successfully');
-      // Get the created order
+      // Get the created order with customer details
       const [createdSO] = await db.query(`
         SELECT 
           so.*, 
-          c.name as customer_name
+          c.name as customer_name,
+          c.phone as customer_phone,
+          c.address as customer_address
         FROM sales_orders so
         LEFT JOIN Clients c ON so.client_id = c.id
         WHERE so.id = ?
@@ -793,7 +799,8 @@ const salesOrderController = {
           soi.*, 
           p.product_name, 
           p.product_code, 
-          p.unit_of_measure
+          p.unit_of_measure,
+          p.cylinder_type
         FROM sales_order_items soi
         LEFT JOIN products p ON soi.product_id = p.id
         WHERE soi.sales_order_id = ?
@@ -801,11 +808,13 @@ const salesOrderController = {
       // Map product fields into a product object for each item
       const mappedItems = items.map(item => ({
         ...item,
+        order_notes: item.order_notes,
         product: {
           id: item.product_id,
           product_name: item.product_name,
           product_code: item.product_code,
-          unit_of_measure: item.unit_of_measure
+          unit_of_measure: item.unit_of_measure,
+          cylinder_type: item.cylinder_type
         }
       }));
       res.json({ success: true, data: mappedItems });
