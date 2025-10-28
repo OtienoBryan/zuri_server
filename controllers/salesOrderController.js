@@ -1164,6 +1164,130 @@ const salesOrderController = {
     } finally {
       connection.release();
     }
+  },
+
+  // Get delivery status with rider information
+  getDeliveryStatus: async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      console.log('Fetching delivery status for order:', id);
+      
+      const [order] = await db.query(`
+        SELECT 
+          so.id,
+          so.so_number,
+          so.status as delivery_status,
+          so.rider_id,
+          r.name as rider_name,
+          r.contact as rider_contact,
+          so.assigned_at,
+          so.customer_id,
+          c.name as customer_name,
+          c.phone as customer_phone,
+          c.address as customer_address,
+          so.order_date,
+          so.expected_delivery_date,
+          so.total_amount,
+          so.my_status,
+          so.created_at,
+          so.updated_at
+        FROM sales_orders so
+        LEFT JOIN Riders r ON so.rider_id = r.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
+        WHERE so.id = ?
+      `, [id]);
+      
+      if (order.length === 0) {
+        return res.status(404).json({ 
+          success: false, 
+          error: 'Sales order not found' 
+        });
+      }
+      
+      res.json({ 
+        success: true, 
+        data: order[0] 
+      });
+      
+    } catch (error) {
+      console.error('Error fetching delivery status:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch delivery status' 
+      });
+    }
+  },
+
+  // Get delivery status for all orders (or filtered)
+  getAllDeliveryStatus: async (req, res) => {
+    try {
+      const { status, rider_id, customer_id } = req.query;
+      
+      let whereClause = 'WHERE 1=1';
+      let queryParams = [];
+      
+      // Filter by delivery status
+      if (status) {
+        const statusArray = status.split(',').map(s => s.trim());
+        const placeholders = statusArray.map(() => '?').join(',');
+        whereClause += ` AND so.status IN (${placeholders})`;
+        queryParams.push(...statusArray);
+      }
+      
+      // Filter by rider
+      if (rider_id) {
+        whereClause += ' AND so.rider_id = ?';
+        queryParams.push(rider_id);
+      }
+      
+      // Filter by customer
+      if (customer_id) {
+        whereClause += ' AND so.customer_id = ?';
+        queryParams.push(customer_id);
+      }
+      
+      console.log('Fetching delivery status with filters:', { status, rider_id, customer_id });
+      
+      const [orders] = await db.query(`
+        SELECT 
+          so.id,
+          so.so_number,
+          so.status as delivery_status,
+          so.rider_id,
+          r.name as rider_name,
+          r.contact as rider_contact,
+          so.assigned_at,
+          so.customer_id,
+          c.name as customer_name,
+          c.phone as customer_phone,
+          c.address as customer_address,
+          so.order_date,
+          so.expected_delivery_date,
+          so.total_amount,
+          so.my_status,
+          so.created_at,
+          so.updated_at
+        FROM sales_orders so
+        LEFT JOIN Riders r ON so.rider_id = r.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
+        ${whereClause}
+        ORDER BY so.created_at DESC
+      `, queryParams);
+      
+      res.json({ 
+        success: true, 
+        data: orders,
+        count: orders.length
+      });
+      
+    } catch (error) {
+      console.error('Error fetching delivery status:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: 'Failed to fetch delivery status' 
+      });
+    }
   }
 };
 
