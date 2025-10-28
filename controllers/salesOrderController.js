@@ -12,7 +12,7 @@ const salesOrderController = {
       
       // Add client_id filter if provided
       if (client_id) {
-        whereClause += ' AND so.client_id = ?';
+        whereClause += ' AND so.customer_id = ?';
         queryParams.push(client_id);
       }
       
@@ -37,7 +37,7 @@ const salesOrderController = {
           u.full_name as created_by_name,
           sr.name as salesrep
         FROM sales_orders so
-        LEFT JOIN Clients c ON so.client_id = c.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN users u ON so.created_by = u.id
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
         ${whereClause}
@@ -134,7 +134,7 @@ const salesOrderController = {
           r.contact as rider_contact,
           receiver.name as received_by_name
         FROM sales_orders so
-        LEFT JOIN Clients c ON so.client_id = c.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN outlet_categories oc ON c.client_type = oc.id
         LEFT JOIN outlet_accounts oa ON c.outlet_account = oa.id
         LEFT JOIN users u ON so.created_by = u.id
@@ -212,7 +212,7 @@ const salesOrderController = {
           r.name as rider_name,
           r.contact as rider_contact
         FROM sales_orders so
-        LEFT JOIN Clients c ON so.client_id = c.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN users u ON so.created_by = u.id
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
         LEFT JOIN Riders r ON so.rider_id = r.id
@@ -367,7 +367,7 @@ const salesOrderController = {
       console.log('Creating order in sales_orders table...');
       const [soResult] = await connection.query(`
         INSERT INTO sales_orders (
-          so_number, client_id, salesrep, order_date, expected_delivery_date, 
+          so_number, customer_id, salesrep, order_date, expected_delivery_date, 
           notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
       `, [soNumber, clientIdToUse, sales_rep_id || null, order_date, expected_delivery_date, notes, subtotal, tax_amount, total_amount, 1]);
@@ -410,11 +410,26 @@ const salesOrderController = {
           totalPrice 
         });
         
-        await connection.query(`
-          INSERT INTO sales_order_items (
-            sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice, item.order_notes || null]);
+        // Try to insert with order_notes if column exists, otherwise without it
+        try {
+          await connection.query(`
+            INSERT INTO sales_order_items (
+              sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice, item.order_notes || null]);
+        } catch (insertError) {
+          // If order_notes column doesn't exist, insert without it
+          if (insertError.code === 'ER_BAD_FIELD_ERROR') {
+            console.log('order_notes column does not exist, inserting without it');
+            await connection.query(`
+              INSERT INTO sales_order_items (
+                sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice]);
+          } else {
+            throw insertError;
+          }
+        }
       }
       console.log('All items created, committing transaction...');
       await connection.commit();
@@ -427,9 +442,26 @@ const salesOrderController = {
           c.phone as customer_phone,
           c.address as customer_address
         FROM sales_orders so
-        LEFT JOIN Clients c ON so.client_id = c.id
+        LEFT JOIN Clients c ON so.customer_id = c.id
         WHERE so.id = ?
       `, [salesOrderId]);
+      
+      // Fetch items with product details (handle if cylinder_type doesn't exist)
+      const [orderItems] = await db.query(`
+        SELECT 
+          soi.*, 
+          p.product_name, 
+          p.product_code, 
+          p.unit_of_measure
+        FROM sales_order_items soi
+        LEFT JOIN products p ON soi.product_id = p.id
+        WHERE soi.sales_order_id = ?
+      `, [salesOrderId]);
+      
+      // Add items to the response
+      if (createdSO[0]) {
+        createdSO[0].items = orderItems;
+      }
       res.status(201).json({ 
         success: true, 
         data: createdSO[0],
