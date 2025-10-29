@@ -78,6 +78,7 @@ const receivablesController = require('../controllers/receivablesController');
 const reportsController = require('../controllers/reportsController');
 const salesOrderController = require('../controllers/salesOrderController');
 const creditNoteController = require('../controllers/creditNoteController');
+const cylinderLedgerController = require('../controllers/cylinderLedgerController');
 
 // Chart of Accounts Routes
 router.get('/accounts', chartOfAccountsController.getAllAccounts);
@@ -148,7 +149,11 @@ router.post('/sales-orders/:id/convert-to-invoice', salesOrderController.convert
 router.post('/sales-orders/:id/complete-delivery', async (req, res) => {
   console.log('Complete delivery route hit:', req.params, req.body);
   
+  const connection = await db.getConnection();
+  
   try {
+    await connection.beginTransaction();
+    
     const { id } = req.params;
     const { recipient_name, recipient_phone, notes } = req.body;
     
@@ -159,8 +164,23 @@ router.post('/sales-orders/:id/complete-delivery', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Get cylinder_code_id from the sales order
+    const [orderData] = await connection.query(
+      'SELECT cylinder_code_id, so_number, customer_id FROM sales_orders WHERE id = ?',
+      [id]
+    );
+    
+    if (orderData.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Sales order not found' });
+    }
+    
+    const cylinderCodeId = orderData[0].cylinder_code_id;
+    const soNumber = orderData[0].so_number;
+    const customerId = orderData[0].customer_id || null; // Use null if customer_id is 0 or falsy
+
     // Update sales order status to delivered
-    const updateResult = await db.query(`
+    await connection.query(`
       UPDATE sales_orders 
       SET my_status = 3, 
           status = 'delivered',
@@ -169,7 +189,41 @@ router.post('/sales-orders/:id/complete-delivery', async (req, res) => {
       WHERE id = ?
     `, [`Delivered to: ${recipient_name} (${recipient_phone}). ${notes || ''}`, id]);
 
-    console.log('Update result:', updateResult);
+    // Update cylinder status to DELIVERED if a cylinder was assigned
+    if (cylinderCodeId) {
+      await connection.query(
+        'UPDATE cylinder_codes SET status = ? WHERE id = ?',
+        ['DELIVERED', cylinderCodeId]
+      );
+      
+      // Log in cylinder ledger
+      await connection.query(`
+        INSERT INTO cylinder_ledger (
+          cylinder_code_id,
+          transaction_type,
+          sales_order_id,
+          so_number,
+          customer_id,
+          transaction_date,
+          notes,
+          performed_by,
+          performed_by_name,
+          status_before,
+          status_after
+        ) VALUES (?, 'DELIVERED', ?, ?, ?, NOW(), ?, NULL, 'System', 'AVAILABLE', 'DELIVERED')
+      `, [
+        cylinderCodeId,
+        id,
+        soNumber,
+        customerId,
+        `Cylinder delivered with order ${soNumber} to ${recipient_name} (${recipient_phone}). ${notes || ''}`
+      ]);
+      
+      console.log(`✅ Cylinder ${cylinderCodeId} status updated to DELIVERED`);
+    }
+
+    await connection.commit();
+    console.log('Delivery completed successfully');
 
     res.json({ 
       success: true, 
@@ -177,8 +231,11 @@ router.post('/sales-orders/:id/complete-delivery', async (req, res) => {
       order_id: id
     });
   } catch (error) {
+    await connection.rollback();
     console.error('Error completing delivery:', error);
     res.status(500).json({ error: 'Failed to complete delivery' });
+  } finally {
+    connection.release();
   }
 });
 
@@ -349,11 +406,50 @@ router.get('/regions', async (req, res) => {
 // Cylinder Codes Route
 router.get('/cylinder-codes', async (req, res) => {
   try {
-    const [cylinderCodes] = await db.query('SELECT id, code FROM cylinder_codes ORDER BY code ASC');
+    // Only fetch cylinders that are REFILLED and ready for assignment
+    const [cylinderCodes] = await db.query(`
+      SELECT id, code 
+      FROM cylinder_codes 
+      WHERE status = 'REFILLED'
+      ORDER BY code ASC
+    `);
+    
+    console.log(`Fetched ${cylinderCodes.length} refilled cylinder codes`);
     res.json({ success: true, data: cylinderCodes });
   } catch (error) {
     console.error('Error fetching cylinder codes:', error);
-    res.status(500).json({ success: false, error: 'Failed to fetch cylinder codes' });
+    
+    // Check if table doesn't exist
+    if (error.code === 'ER_NO_SUCH_TABLE') {
+      return res.json({ 
+        success: true, 
+        data: [], 
+        message: 'Cylinder codes table not found. Please run database migrations.' 
+      });
+    }
+    
+    // If status column doesn't exist, fetch all cylinders
+    if (error.code === 'ER_BAD_FIELD_ERROR') {
+      try {
+        const [allCylinders] = await db.query(`
+          SELECT id, code 
+          FROM cylinder_codes 
+          ORDER BY code ASC
+        `);
+        console.log(`Status column not found. Fetched ${allCylinders.length} cylinder codes`);
+        return res.json({ success: true, data: allCylinders });
+      } catch (fallbackError) {
+        return res.status(500).json({ 
+          success: false, 
+          error: 'Failed to fetch cylinder codes: ' + fallbackError.message 
+        });
+      }
+    }
+    
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to fetch cylinder codes: ' + error.message 
+    });
   }
 });
 
@@ -364,5 +460,18 @@ router.post('/credit-notes', creditNoteController.createCreditNote);
 router.post('/credit-notes/receive-back', authenticateToken, creditNoteController.receiveBackToStock);
 router.get('/customers/:customerId/invoices-for-credit', creditNoteController.getCustomerInvoices);
 router.get('/customers/:customerId/credit-notes', creditNoteController.getCustomerCreditNotes);
+
+// Cylinder Ledger Routes
+router.get('/cylinder-ledger', cylinderLedgerController.getAllEntries);
+router.get('/cylinder-ledger/stats', cylinderLedgerController.getCylinderStats);
+router.get('/cylinder-ledger/cylinder/:cylinderCodeId', cylinderLedgerController.getCylinderHistory);
+router.get('/cylinder-ledger/order/:orderId', cylinderLedgerController.getOrderCylinderHistory);
+router.post('/cylinder-ledger/manual', authenticateToken, cylinderLedgerController.createManualEntry);
+
+// Cylinder Refilling Routes
+const cylinderRefillingController = require('../controllers/cylinderRefillingController');
+router.post('/cylinders/refill', authenticateToken, cylinderRefillingController.refillCylinders);
+router.get('/cylinders/available', authenticateToken, cylinderRefillingController.getAvailableCylinders);
+router.get('/cylinders/refilling-history', authenticateToken, cylinderRefillingController.getRefillingHistory);
 
 module.exports = router; 

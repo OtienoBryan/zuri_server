@@ -1,4 +1,5 @@
 const db = require('../database/db');
+const { DateTime } = require('luxon');
 
 const salesOrderController = {
   // Get all sales orders
@@ -35,11 +36,13 @@ const salesOrderController = {
           c.address as customer_address,
           c.balance as customer_balance,
           u.full_name as created_by_name,
-          sr.name as salesrep
+          sr.name as salesrep,
+          cc.code as cylinder_code
         FROM sales_orders so
         LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN users u ON so.created_by = u.id
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
+        LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         ${whereClause}
         ORDER BY so.created_at DESC
       `, queryParams);
@@ -132,7 +135,8 @@ const salesOrderController = {
           sr.name as salesrep,
           r.name as rider_name,
           r.contact as rider_contact,
-          receiver.name as received_by_name
+          receiver.name as received_by_name,
+          cc.code as cylinder_code
         FROM sales_orders so
         LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN outlet_categories oc ON c.client_type = oc.id
@@ -141,6 +145,7 @@ const salesOrderController = {
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
         LEFT JOIN Riders r ON so.rider_id = r.id
         LEFT JOIN staff receiver ON so.received_by = receiver.id
+        LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         ORDER BY so.created_at DESC
       `);
       
@@ -210,12 +215,14 @@ const salesOrderController = {
           u.full_name as created_by_name,
           sr.name as salesrep,
           r.name as rider_name,
-          r.contact as rider_contact
+          r.contact as rider_contact,
+          cc.code as cylinder_code
         FROM sales_orders so
         LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN users u ON so.created_by = u.id
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
         LEFT JOIN Riders r ON so.rider_id = r.id
+        LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         WHERE so.id = ?
       `, [id]);
       if (salesOrders.length === 0) {
@@ -963,12 +970,91 @@ const salesOrderController = {
       // Get the current user ID from the request
       const currentUserId = req.user?.id || 1;
       
+      // Get current time in Nairobi timezone using Luxon
+      const nairobiTime = DateTime.now().setZone('Africa/Nairobi');
+      const nairobiTimestamp = nairobiTime.toFormat('yyyy-MM-dd HH:mm:ss');
+      
       // Update the sales order with the rider ID, region ID, cylinder code ID, set my_status to 2, assigned_at to now, and dispatched_by to current user
       const now = new Date();
       await connection.query(
         'UPDATE sales_orders SET rider_id = ?, region_id = ?, cylinder_code_id = ?, my_status = 2, assigned_at = ?, dispatched_by = ? WHERE id = ?', 
         [riderId, regionId, cylinderCodeId, now, currentUserId, id]
       );
+      
+      // Update cylinder_codes table with current region, assignment date, and status (using Nairobi timezone)
+      await connection.query(
+        'UPDATE cylinder_codes SET current_region = ?, last_assigned_date = ?, status = ? WHERE id = ?',
+        [regionId, nairobiTimestamp, 'AVAILABLE', cylinderCodeId]
+      );
+      
+      // Log cylinder movement in ledger
+      try {
+        // Get additional details for the ledger
+        const [orderDetails] = await connection.query(`
+          SELECT 
+            so.customer_id,
+            so.so_number,
+            c.name as customer_name,
+            r.name as rider_name
+          FROM sales_orders so
+          LEFT JOIN Clients c ON so.customer_id = c.id
+          LEFT JOIN Riders r ON so.rider_id = r.id
+          WHERE so.id = ?
+        `, [id]);
+        
+        const order = orderDetails[0];
+        const performedByName = req.user?.full_name || req.user?.username || 'System';
+        
+        // Get previous region (if any) from cylinder_codes
+        const [prevCylinder] = await connection.query(
+          'SELECT current_region FROM cylinder_codes WHERE id = ?',
+          [cylinderCodeId]
+        );
+        
+        const fromRegionId = prevCylinder.length > 0 ? prevCylinder[0].current_region : null;
+        
+        await connection.query(`
+          INSERT INTO cylinder_ledger (
+            cylinder_code_id,
+            transaction_type,
+            sales_order_id,
+            so_number,
+            from_region_id,
+            to_region_id,
+            current_region_id,
+            rider_id,
+            rider_name,
+            customer_id,
+            customer_name,
+            transaction_date,
+            notes,
+            performed_by,
+            performed_by_name,
+            status_before,
+            status_after
+          ) VALUES (?, 'ASSIGNED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REFILLED', 'AVAILABLE')
+        `, [
+          cylinderCodeId,
+          id,
+          order.so_number,
+          fromRegionId,
+          regionId,
+          regionId,
+          riderId,
+          order.rider_name,
+          order.customer_id,
+          order.customer_name,
+          nairobiTimestamp,
+          `Cylinder assigned to order ${order.so_number} for delivery to ${order.customer_name}`,
+          currentUserId,
+          performedByName
+        ]);
+        
+        console.log(`✅ Cylinder movement logged in ledger`);
+      } catch (ledgerError) {
+        console.error('⚠️ Warning: Could not log to cylinder_ledger:', ledgerError.message);
+        // Don't fail the entire transaction if ledger logging fails
+      }
       
       await connection.commit();
       console.log(`✅ Rider assigned successfully to order ${salesOrder.so_number || id}. Inventory reduced.`);
