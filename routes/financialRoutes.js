@@ -144,6 +144,7 @@ router.post('/sales-orders', (req, res, next) => {
 router.get('/sales-orders/:id/items', salesOrderController.getSalesOrderItems);
 router.get('/sales-orders/:id/delivery-status', salesOrderController.getDeliveryStatus);
 router.get('/sales-orders/delivery-status/all', salesOrderController.getAllDeliveryStatus);
+router.get('/sales-orders/delivery-status/:identifier', salesOrderController.getDeliveryStatusByIdOrNumber);
 router.post('/sales-orders/:id/receive-back', salesOrderController.receiveBackToStock);
 router.post('/sales-orders/:id/convert-to-invoice', salesOrderController.convertToInvoice);
 router.post('/sales-orders/:id/complete-delivery', async (req, res) => {
