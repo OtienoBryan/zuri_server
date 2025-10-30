@@ -280,64 +280,90 @@ const salesOrderController = {
       console.log('=== CREATE SALES ORDER START ===');
       console.log('Request body:', JSON.stringify(req.body, null, 2));
       
-      await connection.beginTransaction();
-      const { customer_id, client_id, sales_rep_id, order_date, expected_delivery_date, notes, subtotal, tax_amount, total_amount, items } = req.body;
+      const { 
+        customer_id, 
+        client_id, 
+        customer_name,
+        customer_address,
+        customer_phone,
+        customer_email,
+        sales_rep_id, 
+        order_date, 
+        expected_delivery_date, 
+        notes, 
+        subtotal, 
+        tax_amount, 
+        total_amount,
+        total, // Support 'total' as alias for 'total_amount'
+        items 
+      } = req.body;
       
-      // Use either customer_id or client_id (for compatibility)
-      const clientId = client_id || customer_id;
+      // Use either customer_id or client_id (for compatibility), default to 0 if not provided
+      const clientId = client_id || customer_id || 0;
+      
+      // Use 'total' or 'total_amount' (support both)
+      const finalTotalAmount = total_amount || total;
+      
       console.log('Client ID:', clientId);
+      console.log('Customer Details:', { customer_name, customer_address, customer_phone, customer_email });
       console.log('Order date:', order_date);
+      console.log('Total Amount:', finalTotalAmount);
       console.log('Items:', JSON.stringify(items, null, 2));
       
-      // Client validation removed - orders can be created without checking client exists
+      // Validate required fields BEFORE starting transaction
+      if (!items || !Array.isArray(items) || items.length === 0) {
+        connection.release();
+        return res.status(400).json({ 
+          success: false, 
+          error: 'Items array is required and must contain at least one item' 
+        });
+      }
       
-      // Use client_id directly since sales_orders table uses client_id
+      if (!order_date) {
+        connection.release();
+        return res.status(400).json({ 
+          success: false, 
+          error: 'order_date is required' 
+        });
+      }
+      
+      if (!finalTotalAmount && finalTotalAmount !== 0) {
+        connection.release();
+        return res.status(400).json({ 
+          success: false, 
+          error: 'total or total_amount is required' 
+        });
+      }
+      
+      // Start transaction after validation
+      await connection.beginTransaction();
+      
+      // Client validation removed - orders can be created without checking client exists
+      // client_id is optional and defaults to 0 if not provided
       const clientIdToUse = clientId;
       
       // Generate unique SO number by finding the highest existing number
-      let soNumber;
-      let attempts = 0;
-      const maxAttempts = 10;
+      // Use INV- prefix to match existing convention
+      const [maxSO] = await connection.query(`
+        SELECT so_number FROM sales_orders 
+        WHERE so_number LIKE 'INV-%' OR so_number LIKE 'SO-%'
+        ORDER BY CAST(SUBSTRING(so_number, 5) AS UNSIGNED) DESC
+        LIMIT 1
+      `);
       
-      do {
-        attempts++;
-        
-        // Get the highest existing SO number
-        const [maxSO] = await connection.query(`
-          SELECT so_number FROM sales_orders 
-          WHERE so_number LIKE 'SO-%'
-          ORDER BY LENGTH(so_number) DESC, so_number DESC 
-          LIMIT 1
-        `);
-        
-        let nextNumber = 1;
-        if (maxSO.length > 0) {
-          // Extract the number part and increment
-          const soNumberStr = maxSO[0].so_number;
-          const numberPart = soNumberStr.substring(3); // Remove 'SO-' prefix
-          const currentNumber = parseInt(numberPart) || 0;
-          nextNumber = currentNumber + attempts;
-        } else {
-          nextNumber = attempts;
-        }
-        
-        soNumber = `SO-${String(nextNumber).padStart(6, '0')}`;
-        
-        // Check if this SO number already exists
-        const [existingSO] = await connection.query('SELECT id FROM sales_orders WHERE so_number = ?', [soNumber]);
-        
-        if (existingSO.length === 0) {
-          break; // Found a unique number
-        }
-        
-        console.log(`SO number ${soNumber} already exists, trying next...`);
-      } while (attempts < maxAttempts);
-      
-      if (attempts >= maxAttempts) {
-        throw new Error('Unable to generate unique SO number after multiple attempts');
+      let nextNumber = 1;
+      if (maxSO.length > 0) {
+        // Extract the number part and increment
+        const soNumberStr = maxSO[0].so_number;
+        // Remove prefix (either 'INV-' or 'SO-')
+        const numberPart = soNumberStr.replace(/^(INV-|SO-)/, '');
+        const currentNumber = parseInt(numberPart) || 0;
+        nextNumber = currentNumber + 1;
       }
       
-      console.log('Generated unique SO number:', soNumber, 'after', attempts, 'attempts');
+      const soNumber = `INV-${nextNumber}`;
+      
+      console.log('Generated unique SO number:', soNumber);
       
       // Use the totals sent from frontend (unit_price is tax-exclusive)
       console.log('Using frontend totals - Subtotal:', subtotal, 'Tax Amount:', tax_amount, 'Total Amount:', total_amount);
@@ -359,41 +385,134 @@ const salesOrderController = {
         calculatedTotalAmount += itemTotal;
       }
       
-      console.log('Frontend totals - Subtotal:', subtotal, 'Tax Amount:', tax_amount, 'Total Amount:', total_amount);
+      console.log('Frontend totals - Subtotal:', subtotal, 'Tax Amount:', tax_amount, 'Total Amount:', finalTotalAmount);
       console.log('Calculated totals - Subtotal:', calculatedSubtotal, 'Tax Amount:', calculatedTaxAmount, 'Total Amount:', calculatedTotalAmount);
       
       // Use frontend totals but log any discrepancies
       if (Math.abs(subtotal - calculatedSubtotal) > 0.01 || 
           Math.abs(tax_amount - calculatedTaxAmount) > 0.01 || 
-          Math.abs(total_amount - calculatedTotalAmount) > 0.01) {
+          Math.abs(finalTotalAmount - calculatedTotalAmount) > 0.01) {
         console.log('WARNING: Frontend totals differ from calculated totals');
         console.log('Using frontend totals as requested');
       }
       
-      // Create order in sales_orders table
+      // Create order in sales_orders table with customer details
       console.log('Creating order in sales_orders table...');
-      const [soResult] = await connection.query(`
-        INSERT INTO sales_orders (
-          so_number, customer_id, salesrep, order_date, expected_delivery_date, 
-          notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
-      `, [soNumber, clientIdToUse, sales_rep_id || null, order_date, expected_delivery_date, notes, subtotal, tax_amount, total_amount, 1]);
+      
+      // Try to insert with all fields including email if the column exists
+      let soResult;
+      try {
+        [soResult] = await connection.query(`
+          INSERT INTO sales_orders (
+            so_number, customer_id, name, phone, address, email, salesrep, order_date, expected_delivery_date, 
+            notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
+        `, [
+          soNumber, 
+          clientIdToUse, 
+          customer_name || '', 
+          customer_phone || '', 
+          customer_address || '',
+          customer_email || '',
+          sales_rep_id || null, 
+          order_date, 
+          expected_delivery_date, 
+          notes, 
+          subtotal, 
+          tax_amount, 
+          finalTotalAmount, 
+          1
+        ]);
+      } catch (insertError) {
+        // If email column doesn't exist, insert without it
+        if (insertError.code === 'ER_BAD_FIELD_ERROR') {
+          console.log('email column does not exist, inserting without it');
+          [soResult] = await connection.query(`
+            INSERT INTO sales_orders (
+              so_number, customer_id, name, phone, address, salesrep, order_date, expected_delivery_date, 
+              notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
+          `, [
+            soNumber, 
+            clientIdToUse, 
+            customer_name || '', 
+            customer_phone || '', 
+            customer_address || '', 
+            sales_rep_id || null, 
+            order_date, 
+            expected_delivery_date, 
+            notes, 
+            subtotal, 
+            tax_amount, 
+            finalTotalAmount, 
+            1
+          ]);
+        } else {
+          throw insertError;
+        }
+      }
       const salesOrderId = soResult.insertId;
       console.log('Order created with ID:', salesOrderId);
       
-      // Validate that all products exist
+      // Validate that all products exist and map product identifiers to product_id
       console.log('Validating products...');
+      const productMapping = {}; // Map product identifiers to product_id
+      
       for (const item of items) {
-        console.log('Checking product ID:', item.product_id);
-        const [productCheck] = await connection.query('SELECT id FROM products WHERE id = ?', [item.product_id]);
-        console.log('Product check result:', productCheck);
-        if (productCheck.length === 0) {
-          console.log('Product not found, returning error');
+        // Support product_code, product_id, and product_name
+        if (item.product_code) {
+          console.log('Looking up product by code:', item.product_code);
+          const [productCheck] = await connection.query('SELECT id FROM products WHERE product_code = ?', [item.product_code]);
+          console.log('Product check result:', productCheck);
+          if (productCheck.length === 0) {
+            console.log('Product not found, returning error');
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+              success: false, 
+              error: `Product with code ${item.product_code} not found` 
+            });
+          }
+          // Store the mapping from product_code to product_id
+          productMapping[item.product_code] = productCheck[0].id;
+          item.product_id = productCheck[0].id; // Set product_id for use later
+        } else if (item.product_id) {
+          // Fallback to product_id for backward compatibility
+          console.log('Checking product ID:', item.product_id);
+          const [productCheck] = await connection.query('SELECT id FROM products WHERE id = ?', [item.product_id]);
+          console.log('Product check result:', productCheck);
+          if (productCheck.length === 0) {
+            console.log('Product not found, returning error');
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+              success: false, 
+              error: `Product with ID ${item.product_id} not found` 
+            });
+          }
+        } else if (item.product_name) {
+          // Support product_name lookup
+          console.log('Looking up product by name:', item.product_name);
+          const [productCheck] = await connection.query('SELECT id FROM products WHERE product_name = ?', [item.product_name]);
+          console.log('Product check result:', productCheck);
+          if (productCheck.length === 0) {
+            console.log('Product not found, returning error');
+            await connection.rollback();
+            connection.release();
+            return res.status(400).json({ 
+              success: false, 
+              error: `Product with name "${item.product_name}" not found` 
+            });
+          }
+          // Store the mapping from product_name to product_id
+          productMapping[item.product_name] = productCheck[0].id;
+          item.product_id = productCheck[0].id; // Set product_id for use later
+        } else {
           await connection.rollback();
           connection.release();
           return res.status(400).json({ 
             success: false, 
-            error: `Product with ID ${item.product_id} not found` 
+            error: `Either product_id, product_code, or product_name must be provided for each item` 
           });
         }
       }
