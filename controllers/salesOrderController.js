@@ -31,9 +31,9 @@ const salesOrderController = {
       const [rows] = await db.query(`
         SELECT 
           so.*, 
-          c.name as customer_name, 
-          c.phone as customer_phone,
-          c.address as customer_address,
+          so.name as customer_name, 
+          so.phone as customer_phone,
+          so.address as customer_address,
           c.balance as customer_balance,
           u.full_name as created_by_name,
           sr.name as salesrep,
@@ -123,9 +123,9 @@ const salesOrderController = {
       const [rows] = await db.query(`
         SELECT 
           so.*, 
-          c.name as customer_name, 
-          c.phone as customer_phone,
-          c.address as customer_address,
+          so.name as customer_name, 
+          so.phone as customer_phone,
+          so.address as customer_address,
           c.balance as customer_balance,
           c.client_type,
           oc.name as client_type_name,
@@ -207,10 +207,10 @@ const salesOrderController = {
         SELECT 
           so.*, 
           c.id as client_id,
-          c.name,
+          so.name,
           c.contact,
-          c.email,
-          c.address,
+          so.email,
+          so.address,
           c.tax_pin,
           u.full_name as created_by_name,
           sr.name as salesrep,
@@ -454,60 +454,12 @@ const salesOrderController = {
       const salesOrderId = soResult.insertId;
       console.log('Order created with ID:', salesOrderId);
       
-      // Validate that all products exist and map product identifiers to product_id
-      console.log('Validating products...');
-      const productMapping = {}; // Map product identifiers to product_id
+      // OPTIMIZED: Batch validate all products with a single query
+      console.log('Validating products in batch...');
       
+      // First, ensure all items have an identifier
       for (const item of items) {
-        // Support product_code, product_id, and product_name
-        if (item.product_code) {
-          console.log('Looking up product by code:', item.product_code);
-          const [productCheck] = await connection.query('SELECT id FROM products WHERE product_code = ?', [item.product_code]);
-          console.log('Product check result:', productCheck);
-          if (productCheck.length === 0) {
-            console.log('Product not found, returning error');
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ 
-              success: false, 
-              error: `Product with code ${item.product_code} not found` 
-            });
-          }
-          // Store the mapping from product_code to product_id
-          productMapping[item.product_code] = productCheck[0].id;
-          item.product_id = productCheck[0].id; // Set product_id for use later
-        } else if (item.product_id) {
-          // Fallback to product_id for backward compatibility
-          console.log('Checking product ID:', item.product_id);
-          const [productCheck] = await connection.query('SELECT id FROM products WHERE id = ?', [item.product_id]);
-          console.log('Product check result:', productCheck);
-          if (productCheck.length === 0) {
-            console.log('Product not found, returning error');
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ 
-              success: false, 
-              error: `Product with ID ${item.product_id} not found` 
-            });
-          }
-        } else if (item.product_name) {
-          // Support product_name lookup
-          console.log('Looking up product by name:', item.product_name);
-          const [productCheck] = await connection.query('SELECT id FROM products WHERE product_name = ?', [item.product_name]);
-          console.log('Product check result:', productCheck);
-          if (productCheck.length === 0) {
-            console.log('Product not found, returning error');
-            await connection.rollback();
-            connection.release();
-            return res.status(400).json({ 
-              success: false, 
-              error: `Product with name "${item.product_name}" not found` 
-            });
-          }
-          // Store the mapping from product_name to product_id
-          productMapping[item.product_name] = productCheck[0].id;
-          item.product_id = productCheck[0].id; // Set product_id for use later
-        } else {
+        if (!item.product_code && !item.product_id && !item.product_name) {
           await connection.rollback();
           connection.release();
           return res.status(400).json({ 
@@ -516,81 +468,217 @@ const salesOrderController = {
           });
         }
       }
-      console.log('All products validated');
       
-      // Create sales order items
-      console.log('Creating sales order items...');
+      // Collect all product identifiers
+      const productIds = items.filter(item => item.product_id).map(item => item.product_id);
+      const productCodes = items.filter(item => item.product_code).map(item => item.product_code);
+      const productNames = items.filter(item => item.product_name).map(item => item.product_name);
+      
+      // Build a single query to fetch all products at once
+      const conditions = [];
+      const params = [];
+      
+      if (productIds.length > 0) {
+        conditions.push(`id IN (${productIds.map(() => '?').join(',')})`);
+        params.push(...productIds);
+      }
+      if (productCodes.length > 0) {
+        conditions.push(`product_code IN (${productCodes.map(() => '?').join(',')})`);
+        params.push(...productCodes);
+      }
+      if (productNames.length > 0) {
+        conditions.push(`product_name IN (${productNames.map(() => '?').join(',')})`);
+        params.push(...productNames);
+      }
+      
+      const [products] = await connection.query(
+        `SELECT id, product_code, product_name FROM products WHERE ${conditions.join(' OR ')}`,
+        params
+      );
+      
+      console.log('Products fetched:', products.length);
+      
+      // Create lookup maps for fast access
+      const productByIdMap = {};
+      const productByCodeMap = {};
+      const productByNameMap = {};
+      
+      products.forEach(product => {
+        productByIdMap[product.id] = product;
+        if (product.product_code) productByCodeMap[product.product_code] = product;
+        if (product.product_name) productByNameMap[product.product_name] = product;
+      });
+      
+      // Validate and assign product_id to each item
       for (const item of items) {
-        console.log('Creating item:', item);
+        let product = null;
+        let identifier = '';
+        
+        if (item.product_code) {
+          product = productByCodeMap[item.product_code];
+          identifier = `code ${item.product_code}`;
+        } else if (item.product_id) {
+          product = productByIdMap[item.product_id];
+          identifier = `ID ${item.product_id}`;
+        } else if (item.product_name) {
+          product = productByNameMap[item.product_name];
+          identifier = `name "${item.product_name}"`;
+        }
+        
+        if (!product) {
+          console.log('Product not found:', identifier);
+          await connection.rollback();
+          connection.release();
+          return res.status(400).json({ 
+            success: false, 
+            error: `Product with ${identifier} not found` 
+          });
+        }
+        
+        item.product_id = product.id; // Set product_id for use later
+      }
+      console.log('All products validated in batch');
+      
+      // OPTIMIZED: Batch insert all sales order items with a single query
+      console.log('Creating sales order items in batch...');
+      
+      // Prepare all item data
+      const itemsData = items.map(item => {
         const taxType = item.tax_type || '16%';
         const taxRate = taxType === '16%' ? 0.16 : 0; // zero_rated/exempted => 0
         const netPrice = Number(item.quantity) * Number(item.unit_price);
         const itemTaxAmount = +(netPrice * taxRate).toFixed(2);
         const totalPrice = +(netPrice + itemTaxAmount).toFixed(2);
         
-        console.log('Item calculations:', { 
-          quantity: item.quantity, 
-          unitPrice: item.unit_price, 
-          netPrice, 
-          taxAmount: itemTaxAmount, 
-          totalPrice 
+        return {
+          sales_order_id: salesOrderId,
+          product_id: item.product_id,
+          quantity: item.quantity,
+          unit_price: item.unit_price,
+          tax_type: taxType,
+          tax_amount: item.tax_amount || itemTaxAmount,
+          net_price: totalPrice,
+          total_price: totalPrice,
+          order_notes: item.order_notes || null
+        };
+      });
+      
+      // Try to insert with order_notes if column exists, otherwise without it
+      try {
+        // Build parameterized query for batch insert
+        const placeholders = itemsData.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+        const values = [];
+        itemsData.forEach(item => {
+          values.push(
+            item.sales_order_id,
+            item.product_id,
+            item.quantity,
+            item.unit_price,
+            item.tax_type,
+            item.tax_amount,
+            item.net_price,
+            item.total_price,
+            item.order_notes
+          );
         });
         
-        // Try to insert with order_notes if column exists, otherwise without it
-        try {
+        await connection.query(`
+          INSERT INTO sales_order_items (
+            sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes
+          ) VALUES ${placeholders}
+        `, values);
+      } catch (insertError) {
+        // If order_notes column doesn't exist, insert without it
+        if (insertError.code === 'ER_BAD_FIELD_ERROR') {
+          console.log('order_notes column does not exist, inserting without it');
+          const placeholders = itemsData.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+          const values = [];
+          itemsData.forEach(item => {
+            values.push(
+              item.sales_order_id,
+              item.product_id,
+              item.quantity,
+              item.unit_price,
+              item.tax_type,
+              item.tax_amount,
+              item.net_price,
+              item.total_price
+            );
+          });
+          
           await connection.query(`
             INSERT INTO sales_order_items (
-              sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice, item.order_notes || null]);
-        } catch (insertError) {
-          // If order_notes column doesn't exist, insert without it
-          if (insertError.code === 'ER_BAD_FIELD_ERROR') {
-            console.log('order_notes column does not exist, inserting without it');
-            await connection.query(`
-              INSERT INTO sales_order_items (
-                sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `, [salesOrderId, item.product_id, item.quantity, item.unit_price, item.tax_type || '16%', item.tax_amount || itemTaxAmount, totalPrice, totalPrice]);
-          } else {
-            throw insertError;
-          }
+              sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price
+            ) VALUES ${placeholders}
+          `, values);
+        } else {
+          throw insertError;
         }
       }
-      console.log('All items created, committing transaction...');
+      console.log(`Batch inserted ${items.length} items, committing transaction...`);
       await connection.commit();
       console.log('Transaction committed successfully');
-      // Get the created order with customer details
-      const [createdSO] = await db.query(`
+      
+      // OPTIMIZED: Use a single query to fetch order and items with all details
+      const [orderWithItems] = await connection.query(`
         SELECT 
-          so.*, 
-          c.name as customer_name,
-          c.phone as customer_phone,
-          c.address as customer_address
+          so.id, so.so_number, so.customer_id, so.salesrep, so.order_date, 
+          so.expected_delivery_date, so.status, so.subtotal, so.tax_amount, 
+          so.total_amount, so.notes, so.my_status, so.created_by, so.created_at, so.updated_at,
+          so.name as customer_name, so.phone as customer_phone, so.address as customer_address,
+          soi.id as item_id, soi.product_id, soi.quantity, soi.unit_price, 
+          soi.tax_type, soi.tax_amount as item_tax_amount, soi.net_price, soi.total_price,
+          p.product_name, p.product_code, p.unit_of_measure
         FROM sales_orders so
-        LEFT JOIN Clients c ON so.customer_id = c.id
-        WHERE so.id = ?
-      `, [salesOrderId]);
-      
-      // Fetch items with product details (handle if cylinder_type doesn't exist)
-      const [orderItems] = await db.query(`
-        SELECT 
-          soi.*, 
-          p.product_name, 
-          p.product_code, 
-          p.unit_of_measure
-        FROM sales_order_items soi
+        LEFT JOIN sales_order_items soi ON so.id = soi.sales_order_id
         LEFT JOIN products p ON soi.product_id = p.id
-        WHERE soi.sales_order_id = ?
+        WHERE so.id = ?
+        ORDER BY soi.id
       `, [salesOrderId]);
       
-      // Add items to the response
-      if (createdSO[0]) {
-        createdSO[0].items = orderItems;
+      // Transform the flat result into nested structure
+      let responseData = null;
+      if (orderWithItems.length > 0) {
+        const firstRow = orderWithItems[0];
+        responseData = {
+          id: firstRow.id,
+          so_number: firstRow.so_number,
+          customer_id: firstRow.customer_id,
+          customer_name: firstRow.customer_name,
+          customer_phone: firstRow.customer_phone,
+          customer_address: firstRow.customer_address,
+          salesrep: firstRow.salesrep,
+          order_date: firstRow.order_date,
+          expected_delivery_date: firstRow.expected_delivery_date,
+          status: firstRow.status,
+          subtotal: firstRow.subtotal,
+          tax_amount: firstRow.tax_amount,
+          total_amount: firstRow.total_amount,
+          notes: firstRow.notes,
+          my_status: firstRow.my_status,
+          created_by: firstRow.created_by,
+          created_at: firstRow.created_at,
+          updated_at: firstRow.updated_at,
+          items: orderWithItems.filter(row => row.item_id).map(row => ({
+            id: row.item_id,
+            sales_order_id: row.id,
+            product_id: row.product_id,
+            quantity: row.quantity,
+            unit_price: row.unit_price,
+            tax_type: row.tax_type,
+            tax_amount: row.item_tax_amount,
+            net_price: row.net_price,
+            total_price: row.total_price,
+            product_name: row.product_name,
+            product_code: row.product_code,
+            unit_of_measure: row.unit_of_measure
+          }))
+        };
       }
+      
       res.status(201).json({ 
         success: true, 
-        data: createdSO[0],
+        data: responseData,
         message: 'Sales order created successfully' 
       });
     } catch (error) {
@@ -1113,7 +1201,7 @@ const salesOrderController = {
           SELECT 
             so.customer_id,
             so.so_number,
-            c.name as customer_name,
+            so.name as customer_name,
             r.name as rider_name
           FROM sales_orders so
           LEFT JOIN Clients c ON so.customer_id = c.id
@@ -1562,9 +1650,9 @@ const salesOrderController = {
           r.contact as rider_contact,
           so.assigned_at,
           so.customer_id,
-          c.name as customer_name,
-          c.phone as customer_phone,
-          c.address as customer_address,
+          so.name as customer_name,
+          so.phone as customer_phone,
+          so.address as customer_address,
           so.order_date,
           so.expected_delivery_date,
           so.total_amount,
@@ -1638,9 +1726,9 @@ const salesOrderController = {
           r.contact as rider_contact,
           so.assigned_at,
           so.customer_id,
-          c.name as customer_name,
-          c.phone as customer_phone,
-          c.address as customer_address,
+          so.name as customer_name,
+          so.phone as customer_phone,
+          so.address as customer_address,
           so.order_date,
           so.expected_delivery_date,
           so.total_amount,
@@ -1692,9 +1780,9 @@ const salesOrderController = {
           r.contact as rider_contact,
           so.assigned_at,
           so.customer_id,
-          c.name as customer_name,
-          c.phone as customer_phone,
-          c.address as customer_address,
+          so.name as customer_name,
+          so.phone as customer_phone,
+          so.address as customer_address,
           so.order_date,
           so.expected_delivery_date,
           so.total_amount,
