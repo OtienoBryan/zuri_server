@@ -12,7 +12,7 @@ process.env.TZ = 'UTC';
 process.env.NODE_TZ = 'UTC';
 
 // Try to require database and other modules, but don't crash if they fail
-let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, locationsRoutes;
+let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, locationsRoutes, webhookRoutes;
 
 try {
   db = require('./database/db');
@@ -56,6 +56,7 @@ try {
   clientAssignmentRoutes = require('./routes/clientAssignmentRoutes');
   routesRoutes = require('./routes/routesRoutes');
   locationsRoutes = require('./routes/locationsRoutes');
+  webhookRoutes = require('./routes/webhookRoutes');
 } catch (error) {
   console.log('Some modules failed to load:', error.message);
 }
@@ -513,6 +514,7 @@ app.use('/api/my-assets', myAssetsRoutes);
   app.use('/api/stores', storeRoutes);
   app.use('/api/asset-assignments', assetAssignmentRoutes);
   app.use('/api/merchandise', merchandiseRoutes);
+  app.use('/api/webhooks', webhookRoutes);
 
 app.use('/api/sales-rep-leaves', salesRepLeaveRoutes);
 app.use('/api/calendar-tasks', calendarTaskRoutes);

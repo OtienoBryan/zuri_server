@@ -108,19 +108,15 @@ const salesOrderController = {
     try {
       console.log('Fetching all sales orders (including drafts)...');
       
-      // First, let's check how many sales orders exist in total
-      const [totalOrders] = await db.query('SELECT COUNT(*) as total FROM sales_orders');
-      console.log('Total sales orders in database:', totalOrders[0].total);
+      // Optional pagination and limit (with validation)
+      const limit = parseInt(req.query.limit);
+      const offset = parseInt(req.query.offset) || 0;
       
-      // Check how many have my_status = 0 (drafts)
-      const [draftOrders] = await db.query('SELECT COUNT(*) as drafts FROM sales_orders WHERE my_status = 0');
-      console.log('Sales orders with my_status = 0 (drafts):', draftOrders[0].drafts);
+      // Validate limit (max 1000 to prevent abuse)
+      const validLimit = (limit && limit > 0 && limit <= 1000) ? limit : null;
       
-      // Check how many have my_status = 1 (confirmed)
-      const [confirmedOrders] = await db.query('SELECT COUNT(*) as confirmed FROM sales_orders WHERE my_status = 1');
-      console.log('Sales orders with my_status = 1 (confirmed):', confirmedOrders[0].confirmed);
-      
-      const [rows] = await db.query(`
+      // Optimized: Fetch orders and items in parallel queries instead of N+1
+      let query = `
         SELECT 
           so.*, 
           so.name as customer_name, 
@@ -147,16 +143,22 @@ const salesOrderController = {
         LEFT JOIN staff receiver ON so.received_by = receiver.id
         LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         ORDER BY so.created_at DESC
-      `);
+      `;
       
-      console.log('Query result rows:', rows.length);
-      if (rows.length > 0) {
-        console.log('Sample order:', rows[0]);
+      const queryParams = [];
+      if (validLimit) {
+        query += ` LIMIT ? OFFSET ?`;
+        queryParams.push(validLimit, offset);
       }
       
-      // Get items for each sales order
-      for (let order of rows) {
-        const [items] = await db.query(`
+      const [rows] = await db.query(query, queryParams);
+      
+      // Fetch all items for all orders in a single query (optimized N+1 fix)
+      if (rows.length > 0) {
+        const orderIds = rows.map(o => o.id);
+        // Use proper parameterized query to prevent SQL injection
+        const placeholders = orderIds.map(() => '?').join(',');
+        const [allItems] = await db.query(`
           SELECT 
             soi.*, 
             p.product_name, 
@@ -165,29 +167,46 @@ const salesOrderController = {
             p.cylinder_type
           FROM sales_order_items soi
           LEFT JOIN products p ON soi.product_id = p.id
-          WHERE soi.sales_order_id = ?
-        `, [order.id]);
+          WHERE soi.sales_order_id IN (${placeholders})
+          ORDER BY soi.sales_order_id, soi.id
+        `, orderIds);
         
-        // Map product fields into a product object for each item
-        order.items = items.map(item => ({
-          id: item.id,
-          sales_order_id: item.sales_order_id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit_price: parseFloat(item.unit_price),
-          total_price: parseFloat(item.total_price),
-          tax_type: item.tax_type,
-          tax_amount: parseFloat(item.tax_amount),
-          net_price: parseFloat(item.net_price),
-          order_notes: item.order_notes,
-          product: {
-            id: item.product_id,
-            product_name: item.product_name || `Product ${item.product_id}`,
-            product_code: item.product_code || 'No Code',
-            unit_of_measure: item.unit_of_measure || 'PCS',
-            cylinder_type: item.cylinder_type
+        // Group items by sales_order_id
+        const itemsByOrderId = {};
+        allItems.forEach(item => {
+          if (!itemsByOrderId[item.sales_order_id]) {
+            itemsByOrderId[item.sales_order_id] = [];
           }
-        }));
+          itemsByOrderId[item.sales_order_id].push({
+            id: item.id,
+            sales_order_id: item.sales_order_id,
+            product_id: item.product_id,
+            quantity: item.quantity,
+            unit_price: parseFloat(item.unit_price),
+            total_price: parseFloat(item.total_price),
+            tax_type: item.tax_type,
+            tax_amount: parseFloat(item.tax_amount),
+            net_price: parseFloat(item.net_price),
+            order_notes: item.order_notes,
+            product: {
+              id: item.product_id,
+              product_name: item.product_name || `Product ${item.product_id}`,
+              product_code: item.product_code || 'No Code',
+              unit_of_measure: item.unit_of_measure || 'PCS',
+              cylinder_type: item.cylinder_type
+            }
+          });
+        });
+        
+        // Attach items to orders
+        rows.forEach(order => {
+          order.items = itemsByOrderId[order.id] || [];
+        });
+      } else {
+        // No orders, ensure items is empty array
+        rows.forEach(order => {
+          order.items = [];
+        });
       }
       
       console.log('Final response data length:', rows.length);

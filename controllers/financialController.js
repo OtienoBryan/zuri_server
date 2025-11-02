@@ -374,6 +374,8 @@ const productsController = {
   // Get all products
   getAllProducts: async (req, res) => {
     try {
+      console.log('Fetching all products...');
+      // Try to query with is_active filter first
       const [rows] = await db.query(`
         SELECT * FROM products 
         WHERE is_active = true 
@@ -382,7 +384,27 @@ const productsController = {
       res.json({ success: true, data: rows });
     } catch (error) {
       console.error('Error fetching products:', error);
-      res.status(500).json({ success: false, error: 'Failed to fetch products' });
+      // If is_active column doesn't exist, query without it
+      if (error.code === 'ER_BAD_FIELD_ERROR' || error.message.includes('is_active')) {
+        try {
+          console.log('is_active column not found, fetching all products');
+          const [rows] = await db.query(`SELECT * FROM products ORDER BY product_name`);
+          res.json({ success: true, data: rows });
+        } catch (fallbackError) {
+          console.error('Fallback query failed:', fallbackError);
+          res.status(500).json({ 
+            success: false, 
+            error: 'Failed to fetch products',
+            details: fallbackError.message 
+          });
+        }
+      } else {
+        res.status(500).json({ 
+          success: false, 
+          error: 'Failed to fetch products',
+          details: error.message 
+        });
+      }
     }
   },
 
@@ -1868,10 +1890,31 @@ const uploadProductImage = async (req, res) => {
 // Create product with optional image upload
 const createProduct = async (req, res) => {
   try {
-    const { product_name, product_code, category_id, cost_price } = req.body;
-    if (!product_name || !product_code || !category_id || !cost_price) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    console.log('Create product request body:', req.body);
+    console.log('Create product request file:', req.file ? 'File present' : 'No file');
+    
+    // Parse form data fields - handle both multipart/form-data and JSON
+    const product_name = req.body.product_name;
+    const product_code = req.body.product_code;
+    const category_id = req.body.category_id;
+    // cost_price is optional - default to 0 if not provided (for non-admin users)
+    const cost_price = req.body.cost_price !== undefined && req.body.cost_price !== '' 
+      ? parseFloat(req.body.cost_price) 
+      : 0;
+    
+    // Validate required fields
+    const missingFields = [];
+    if (!product_name || product_name.trim() === '') missingFields.push('product_name');
+    if (!product_code || product_code.trim() === '') missingFields.push('product_code');
+    if (!category_id || category_id === '') missingFields.push('category_id');
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: `Missing required fields: ${missingFields.join(', ')}` 
+      });
     }
+    
     let imageUrl = null;
     if (req.file) {
       // Convert buffer to base64 for Cloudinary
@@ -1886,10 +1929,12 @@ const createProduct = async (req, res) => {
       });
       imageUrl = result.secure_url;
     }
+    
     // Get category name for denormalized field
     let categoryName = '';
     const [catRows] = await db.query('SELECT name FROM Category WHERE id = ?', [category_id]);
     if (catRows.length > 0) categoryName = catRows[0].name;
+    
     const [result] = await db.query(
       `INSERT INTO products (product_code, product_name, category, category_id, cost_price, image_url)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1899,7 +1944,11 @@ const createProduct = async (req, res) => {
     res.status(201).json({ success: true, data: rows[0] });
   } catch (error) {
     console.error('Error creating product:', error);
-    res.status(500).json({ success: false, error: 'Failed to create product' });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Failed to create product',
+      details: error.message 
+    });
   }
 };
 
