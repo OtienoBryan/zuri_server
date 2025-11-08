@@ -839,7 +839,9 @@ app.get('/api/sales-reps', async (req, res) => {
   }
 });
 
-// Feedback Reports route
+// Feedback Reports routes are handled by the router at line 137
+// Duplicate route removed - using controller instead
+/*
 app.get('/api/feedback-reports', async (req, res) => {
   try {
     console.log('Feedback reports route hit!');
@@ -950,8 +952,10 @@ app.get('/api/feedback-reports', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+*/
 
-// Feedback Reports CSV Export route
+// Feedback Reports CSV Export route - DUPLICATE, using controller instead
+/*
 app.get('/api/feedback-reports/export', async (req, res) => {
   try {
     console.log('Feedback reports CSV export route hit!');
@@ -1104,48 +1108,13 @@ app.get('/api/feedback-reports/export', async (req, res) => {
     res.status(500).json({ success: false, error: err.message });
   }
 });
+*/
 
-// Get available countries for feedback filtering
-app.get('/api/feedback-countries', async (req, res) => {
-  try {
-    console.log('Feedback countries route hit!');
-    
-    const sql = `
-      SELECT DISTINCT co.id, co.name
-      FROM Country co
-      INNER JOIN Clients c ON c.countryId = co.id
-      INNER JOIN FeedbackReport fr ON fr.clientId = c.id
-      ORDER BY co.name ASC
-    `;
-    
-    const [results] = await db.query(sql);
-    res.json({ success: true, data: results });
-  } catch (err) {
-    console.error('Error fetching feedback countries:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Get available sales reps for feedback filtering
-app.get('/api/feedback-sales-reps', async (req, res) => {
-  try {
-    console.log('Feedback sales reps route hit!');
-    
-    const sql = `
-      SELECT DISTINCT u.id, u.name
-      FROM SalesRep u
-      INNER JOIN FeedbackReport fr ON fr.userId = u.id
-      WHERE u.status = 1
-      ORDER BY u.name ASC
-    `;
-    
-    const [results] = await db.query(sql);
-    res.json({ success: true, data: results });
-  } catch (err) {
-    console.error('Error fetching feedback sales reps:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+// Get available countries and sales reps for feedback filtering
+// Using controller methods that query the correct feedback_report table
+const feedbackReportController = require('./controllers/feedbackReportController');
+app.get('/api/feedback-countries', feedbackReportController.getFeedbackCountries);
+app.get('/api/feedback-sales-reps', feedbackReportController.getFeedbackSalesReps);
 
 // Availability Reports CSV Export route
 app.get('/api/availability-reports/export', async (req, res) => {
@@ -1317,44 +1286,43 @@ app.get('/api/availability-reports/export', async (req, res) => {
   }
 });
 
-// Get available countries for availability filtering
+// Get available outlets for availability filtering
 app.get('/api/availability-countries', async (req, res) => {
   try {
-    console.log('Availability countries route hit!');
+    console.log('Availability outlets route hit!');
     
-    const sql = `
-      SELECT DISTINCT co.name
-      FROM Country co
-      INNER JOIN Clients c ON c.countryId = co.id
-      INNER JOIN ProductReport pr ON pr.clientId = c.id
-      ORDER BY co.name ASC
-    `;
-    
-    const [results] = await db.query(sql);
-    const countries = results.map(row => row.name);
-    res.json(countries);
+    // Try to query the table, return empty array if table doesn't exist
+    try {
+      const sql = `
+        SELECT DISTINCT COALESCE(c.name, ar.outlet) AS outlet_name, ar.outlet_id
+        FROM \`asset_report\` ar
+        LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
+        WHERE (c.name IS NOT NULL AND c.name != '') OR (ar.outlet IS NOT NULL AND ar.outlet != '')
+        ORDER BY outlet_name ASC
+      `;
+      
+      const [results] = await db.query(sql);
+      const outlets = results.map(row => row.outlet_name).filter(name => name);
+      res.json(outlets);
+    } catch (queryErr) {
+      if (queryErr.code === 'ER_NO_SUCH_TABLE' || queryErr.errno === 1146) {
+        // Table doesn't exist yet, return empty array
+        console.log('asset_report table does not exist yet');
+        res.json([]);
+      } else {
+        throw queryErr;
+      }
+    }
   } catch (err) {
-    console.error('Error fetching availability countries:', err);
+    console.error('Error fetching availability outlets:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// Get available sales reps for availability filtering
+// Get available sales reps for availability filtering (returns empty for now)
 app.get('/api/availability-sales-reps', async (req, res) => {
   try {
-    console.log('Availability sales reps route hit!');
-    
-    const sql = `
-      SELECT DISTINCT u.name
-      FROM SalesRep u
-      INNER JOIN ProductReport pr ON pr.userId = u.id
-      WHERE u.status = 1
-      ORDER BY u.name ASC
-    `;
-    
-    const [results] = await db.query(sql);
-    const salesReps = results.map(row => row.name);
-    res.json(salesReps);
+    res.json([]);
   } catch (err) {
     console.error('Error fetching availability sales reps:', err);
     res.status(500).json({ success: false, error: err.message });

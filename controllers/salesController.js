@@ -3,6 +3,34 @@ const multer = require('multer');
 const cloudinary = require('../config/cloudinary');
 const upload = multer({ storage: multer.memoryStorage() });
 
+// Get all rep types
+exports.getAllRepTypes = async (req, res) => {
+  try {
+    // Check if rep_type table exists
+    const [tables] = await db.query(`
+      SELECT COUNT(*) as count 
+      FROM information_schema.TABLES 
+      WHERE TABLE_SCHEMA = DATABASE() 
+      AND TABLE_NAME = 'rep_type'
+    `);
+    
+    if (tables[0].count === 0) {
+      // Table doesn't exist, return empty array
+      return res.json([]);
+    }
+    
+    const [rows] = await db.query('SELECT * FROM rep_type ORDER BY name ASC');
+    res.json(rows);
+  } catch (err) {
+    console.error('Get rep types error:', err);
+    // If table doesn't exist, return empty array instead of error
+    if (err.message.includes("doesn't exist") || err.code === 'ER_NO_SUCH_TABLE') {
+      return res.json([]);
+    }
+    res.status(500).json({ error: 'Failed to fetch rep types', details: err.message });
+  }
+};
+
 // Get all countries
 exports.getAllCountries = async (req, res) => {
   try {
@@ -43,12 +71,84 @@ exports.getAllRoutes = async (req, res) => {
 // Get all sales reps
 exports.getAllSalesReps = async (req, res) => {
   try {
-    const [rows] = await db.query(`
-      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
-             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
-      FROM SalesRep s
-      ORDER BY s.name ASC
-    `);
+    const { status } = req.query;
+    
+    // Check if rep_type table and rep_type_id column exist
+    let hasRepType = false;
+    try {
+      const [tables] = await db.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.TABLES 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'rep_type'
+      `);
+      const [columns] = await db.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'SalesRep' 
+        AND COLUMN_NAME = 'rep_type_id'
+      `);
+      hasRepType = tables[0].count > 0 && columns[0].count > 0;
+    } catch (checkErr) {
+      console.warn('Could not check for rep_type table/column:', checkErr.message);
+      hasRepType = false;
+    }
+    
+    let query;
+    let params = [];
+    
+    if (hasRepType) {
+      // Use query with rep_type join
+      if (status !== undefined) {
+        query = `
+          SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+                 s.route_name_update, s.photoUrl, s.status, s.rep_type_id,
+                 rt.name as rep_type_name, rt.description as rep_type_description,
+                 s.createdAt as created_at, s.updatedAt as updated_at
+          FROM SalesRep s
+          LEFT JOIN rep_type rt ON s.rep_type_id = rt.id
+          WHERE s.status = ?
+          ORDER BY s.name ASC
+        `;
+        params = [status];
+      } else {
+        query = `
+          SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+                 s.route_name_update, s.photoUrl, s.status, s.rep_type_id,
+                 rt.name as rep_type_name, rt.description as rep_type_description,
+                 s.createdAt as created_at, s.updatedAt as updated_at
+          FROM SalesRep s
+          LEFT JOIN rep_type rt ON s.rep_type_id = rt.id
+          ORDER BY s.name ASC
+        `;
+      }
+    } else {
+      // Use query without rep_type (for backward compatibility)
+      if (status !== undefined) {
+        query = `
+          SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+                 s.route_name_update, s.photoUrl, s.status,
+                 NULL as rep_type_id, NULL as rep_type_name, NULL as rep_type_description,
+                 s.createdAt as created_at, s.updatedAt as updated_at
+          FROM SalesRep s
+          WHERE s.status = ?
+          ORDER BY s.name ASC
+        `;
+        params = [status];
+      } else {
+        query = `
+          SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+                 s.route_name_update, s.photoUrl, s.status,
+                 NULL as rep_type_id, NULL as rep_type_name, NULL as rep_type_description,
+                 s.createdAt as created_at, s.updatedAt as updated_at
+          FROM SalesRep s
+          ORDER BY s.name ASC
+        `;
+      }
+    }
+    
+    const [rows] = await db.query(query, params);
     res.json(rows);
   } catch (err) {
     console.error('Get all sales reps error:', err);
@@ -62,10 +162,14 @@ exports.getAllSalesReps = async (req, res) => {
 
 // Create a new sales rep
 exports.createSalesRep = async (req, res) => {
-  const { name, email, phoneNumber, country, region, route, photo } = req.body;
+  const { name, email, phoneNumber, country, region, route, route_name_update, photo, photoUrl, rep_type_id } = req.body;
+  
+  // Use route_name_update if provided, otherwise fall back to route
+  const routeName = route_name_update || route || '';
+  const photoUrlValue = photoUrl || photo || '';
   
   console.log('Create Sales Rep - Received data:', {
-    name, email, phoneNumber, country, region, route, photo
+    name, email, phoneNumber, country, region, route, route_name_update, photo, photoUrl, rep_type_id
   });
   
   // Validate required fields
@@ -86,18 +190,56 @@ exports.createSalesRep = async (req, res) => {
       });
     }
     
-    const [result] = await db.query(
-      'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())',
-      [name, email, phoneNumber, country, region, route || '', photo]
-    );
+    // Check if rep_type_id column exists
+    let hasRepType = false;
+    try {
+      const [columns] = await db.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'SalesRep' 
+        AND COLUMN_NAME = 'rep_type_id'
+      `);
+      hasRepType = columns[0].count > 0;
+    } catch (checkErr) {
+      hasRepType = false;
+    }
+    
+    let insertQuery, insertParams;
+    if (hasRepType) {
+      insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, rep_type_id, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
+      insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue, rep_type_id || null];
+    } else {
+      insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
+      insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue];
+    }
+    
+    const [result] = await db.query(insertQuery, insertParams);
     
     // Fetch the created sales rep with proper field mapping
-    const [newRep] = await db.query(`
-      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
-             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
-      FROM SalesRep s
-      WHERE s.id = ?
-    `, [result.insertId]);
+    let selectQuery;
+    if (hasRepType) {
+      selectQuery = `
+        SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+               s.route_name_update, s.photoUrl, s.status, s.rep_type_id,
+               rt.name as rep_type_name, rt.description as rep_type_description,
+               s.createdAt as created_at, s.updatedAt as updated_at
+        FROM SalesRep s
+        LEFT JOIN rep_type rt ON s.rep_type_id = rt.id
+        WHERE s.id = ?
+      `;
+    } else {
+      selectQuery = `
+        SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
+               s.route_name_update, s.photoUrl, s.status,
+               NULL as rep_type_id, NULL as rep_type_name, NULL as rep_type_description,
+               s.createdAt as created_at, s.updatedAt as updated_at
+        FROM SalesRep s
+        WHERE s.id = ?
+      `;
+    }
+    
+    const [newRep] = await db.query(selectQuery, [result.insertId]);
     
     res.status(201).json({ 
       success: true,
@@ -114,58 +256,106 @@ exports.createSalesRep = async (req, res) => {
   }
 };
 
-// Update a sales rep
+// Update a sales rep (partial updates supported)
 exports.updateSalesRep = async (req, res) => {
   const { id } = req.params;
-  const { name, email, phoneNumber, country, region, route_name_update, photoUrl } = req.body;
-  
-  console.log('Update Sales Rep - Received data:', {
-    id, name, email, phoneNumber, country, region, route_name_update, photoUrl
+  const { name, email, phoneNumber, country, region, route_name_update, photoUrl, rep_type_id } = req.body;
+
+  console.log('[updateSalesRep] Incoming request:', {
+    params: req.params,
+    bodyKeys: Object.keys(req.body || {}),
+    rawBody: req.body
   });
-  
-  // Validate required fields
-  if (!name || !email) {
-    return res.status(400).json({ 
-      success: false, 
-      message: 'Name and email are required' 
-    });
-  }
-  
+
   try {
-    // Check if email already exists for another sales rep
-    const [existing] = await db.query('SELECT id FROM SalesRep WHERE email = ? AND id != ?', [email, id]);
-    if (existing.length > 0) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email already exists for another sales rep' 
-      });
+    // Check if rep_type_id column exists
+    let hasRepType = false;
+    try {
+      const [columns] = await db.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'SalesRep' 
+        AND COLUMN_NAME = 'rep_type_id'
+      `);
+      hasRepType = columns[0].count > 0;
+    } catch (checkErr) {
+      hasRepType = false;
     }
     
-    await db.query(
-      'UPDATE SalesRep SET name = ?, email = ?, phoneNumber = ?, country = ?, region = ?, route_name_update = ?, photoUrl = ?, updatedAt = NOW() WHERE id = ?',
-      [name, email, phoneNumber, country, region, route_name_update || '', photoUrl, id]
-    );
+    // Build dynamic update
+    const fields = [];
+    const values = [];
+
+    console.log('[updateSalesRep] Pre-build fields from body...');
+    if (name !== undefined) { fields.push('name = ?'); values.push(name); }
+    if (email !== undefined) { fields.push('email = ?'); values.push(email); }
+    if (phoneNumber !== undefined) { fields.push('phoneNumber = ?'); values.push(phoneNumber); }
+    if (country !== undefined) { fields.push('country = ?'); values.push(country); }
+    if (region !== undefined) { fields.push('region = ?'); values.push(region); }
+    if (route_name_update !== undefined) { fields.push('route_name_update = ?'); values.push(route_name_update || ''); }
+    if (photoUrl !== undefined) { fields.push('photoUrl = ?'); values.push(photoUrl); }
+    // Only add rep_type_id if column exists
+    if (hasRepType && rep_type_id !== undefined) { 
+      fields.push('rep_type_id = ?'); 
+      values.push(rep_type_id || null); 
+    }
+
+    console.log('[updateSalesRep] Computed fields to update:', fields);
+    console.log('[updateSalesRep] Corresponding values:', values);
+    if (fields.length === 0) {
+      console.warn('[updateSalesRep] 400: No fields provided for update');
+      return res.status(400).json({ success: false, message: 'No fields provided for update' });
+    }
+
+    // Email uniqueness check only if email provided
+    if (email !== undefined) {
+      console.log('[updateSalesRep] Checking email uniqueness for:', email);
+      const [existing] = await db.query('SELECT id FROM SalesRep WHERE email = ? AND id != ?', [email, id]);
+      console.log('[updateSalesRep] Existing with same email (excluding id):', existing.length);
+      if (existing.length > 0) {
+        console.warn('[updateSalesRep] 400: Email already exists for another sales rep');
+        return res.status(400).json({ success: false, message: 'Email already exists for another sales rep' });
+      }
+    }
+
+    fields.push('updatedAt = NOW()');
+    values.push(id);
+
+    console.log('[updateSalesRep] Executing UPDATE with fields:', fields.join(', '));
+    const [result] = await db.query(`UPDATE SalesRep SET ${fields.join(', ')} WHERE id = ?`, values);
+    console.log('[updateSalesRep] Update result:', result);
+
+    // Return updated record
+    let selectQuery;
+    if (hasRepType) {
+      selectQuery = `
+        SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region,
+               s.route_name_update, s.photoUrl, s.status, s.rep_type_id,
+               rt.name as rep_type_name, rt.description as rep_type_description,
+               s.createdAt as created_at, s.updatedAt as updated_at
+        FROM SalesRep s
+        LEFT JOIN rep_type rt ON s.rep_type_id = rt.id
+        WHERE s.id = ?
+      `;
+    } else {
+      selectQuery = `
+        SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region,
+               s.route_name_update, s.photoUrl, s.status,
+               NULL as rep_type_id, NULL as rep_type_name, NULL as rep_type_description,
+               s.createdAt as created_at, s.updatedAt as updated_at
+        FROM SalesRep s
+        WHERE s.id = ?
+      `;
+    }
     
-    // Fetch the updated sales rep with proper field mapping
-    const [updatedRep] = await db.query(`
-      SELECT s.id, s.name, s.email, s.phoneNumber, s.country, s.region, 
-             s.route_name_update, s.photoUrl, s.status, s.createdAt as created_at, s.updatedAt as updated_at
-      FROM SalesRep s
-      WHERE s.id = ?
-    `, [id]);
-    
-    res.json({ 
-      success: true,
-      message: 'Sales representative updated successfully',
-      data: updatedRep[0]
-    });
+    const [updatedRep] = await db.query(selectQuery, [id]);
+    console.log('[updateSalesRep] Updated row fetched:', updatedRep && updatedRep[0]);
+
+    res.json({ success: true, message: 'Sales representative updated successfully', data: updatedRep[0] });
   } catch (err) {
-    console.error('Error updating sales rep:', err);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Failed to update sales rep', 
-      error: err.message 
-    });
+    console.error('[updateSalesRep] 500 error:', err && err.stack ? err.stack : err);
+    res.status(500).json({ success: false, message: 'Failed to update sales rep', error: err.message });
   }
 };
 

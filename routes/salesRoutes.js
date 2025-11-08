@@ -3,6 +3,7 @@ const router = express.Router();
 const salesController = require('../controllers/salesController');
 
 // Dropdown endpoints
+router.get('/rep-types', salesController.getAllRepTypes);
 router.get('/countries', salesController.getAllCountries);
 router.get('/regions', salesController.getAllRegions);
 router.get('/routes', salesController.getAllRoutes);

@@ -5,7 +5,24 @@ const journeyPlanController = {
   getAllJourneyPlans: async (req, res) => {
     try {
       const [plans] = await db.query(`
-        SELECT jp.*, 
+        SELECT jp.id,
+               jp.date,
+               jp.time,
+               jp.userId,
+               jp.clientId,
+               jp.status,
+               jp.checkInTime as checkInTime,
+               jp.checkoutTime as checkoutTime,
+               jp.latitude,
+               jp.longitude,
+               jp.imageUrl,
+               jp.notes,
+               jp.checkoutLatitude,
+               jp.checkoutLongitude,
+               jp.showUpdateLocation,
+               jp.routeId,
+               jp.createdAt,
+               jp.updatedAt,
                s.name as user_name,
                c.name as client_name,
                c.name as client_company_name,
@@ -17,7 +34,61 @@ const journeyPlanController = {
         ORDER BY jp.date DESC, jp.time ASC
       `);
       
-      res.json({ success: true, data: plans });
+      // Normalize field names to camelCase (MySQL might return in different cases)
+      const normalizedPlans = plans.map(plan => {
+        const normalized = { ...plan };
+        
+        // Normalize checkInTime (handle case variations)
+        if (plan.checkInTime !== undefined) {
+          normalized.checkInTime = plan.checkInTime;
+        } else if (plan.checkinTime !== undefined) {
+          normalized.checkInTime = plan.checkinTime;
+          delete normalized.checkinTime;
+        } else if (plan.check_in_time !== undefined) {
+          normalized.checkInTime = plan.check_in_time;
+          delete normalized.check_in_time;
+        } else if (plan.CheckInTime !== undefined) {
+          normalized.checkInTime = plan.CheckInTime;
+          delete normalized.CheckInTime;
+        }
+        
+        // Normalize checkoutTime (handle case variations)
+        if (plan.checkoutTime !== undefined) {
+          normalized.checkoutTime = plan.checkoutTime;
+        } else if (plan.checkout_time !== undefined) {
+          normalized.checkoutTime = plan.checkout_time;
+          delete normalized.checkout_time;
+        } else if (plan.CheckoutTime !== undefined) {
+          normalized.checkoutTime = plan.CheckoutTime;
+          delete normalized.CheckoutTime;
+        }
+        
+        return normalized;
+      });
+      
+      // Debug: Log sample data to see what's being returned
+      if (normalizedPlans && normalizedPlans.length > 0) {
+        console.log('Sample journey plan (first record):', JSON.stringify(normalizedPlans[0], null, 2));
+        console.log('Sample journey plan keys:', Object.keys(normalizedPlans[0]));
+        // Count how many have checkInTime
+        const withCheckIn = normalizedPlans.filter(p => p.checkInTime).length;
+        const withCheckOut = normalizedPlans.filter(p => p.checkoutTime).length;
+        console.log(`Total plans: ${normalizedPlans.length}, Plans with checkInTime: ${withCheckIn}, Plans with checkoutTime: ${withCheckOut}`);
+        
+        // Log a sample that has checkInTime if available
+        const sampleWithCheckIn = normalizedPlans.find(p => p.checkInTime);
+        if (sampleWithCheckIn) {
+          console.log('Sample plan with checkInTime:', {
+            id: sampleWithCheckIn.id,
+            clientId: sampleWithCheckIn.clientId,
+            checkInTime: sampleWithCheckIn.checkInTime,
+            checkoutTime: sampleWithCheckIn.checkoutTime,
+            checkInTimeType: typeof sampleWithCheckIn.checkInTime
+          });
+        }
+      }
+      
+      res.json({ success: true, data: normalizedPlans });
     } catch (error) {
       console.error('Get all journey plans error:', error);
       res.status(500).json({ success: false, message: 'Failed to fetch journey plans', error: error.message });
