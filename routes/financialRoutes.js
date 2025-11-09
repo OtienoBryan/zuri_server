@@ -307,6 +307,7 @@ router.post('/receivables/confirm-payment', receivablesController.confirmCustome
 router.get('/receipts', receivablesController.listReceipts);
 router.get('/receipts/invoice/:invoice_id/pending', receivablesController.getPendingReceiptsForInvoice);
 router.get('/receipts/invoice/:invoice_id', receivablesController.getReceiptsByInvoice);
+router.get('/receipts/amounts-bulk', receivablesController.getReceiptAmountsBulk);
 router.get('/clients/:clientId/outstanding-balance', receivablesController.getClientOutstandingBalance);
 router.put('/receipts/:id/confirm', receivablesController.confirmPayment);
 router.put('/receipts/:id/decline', receivablesController.declinePayment);

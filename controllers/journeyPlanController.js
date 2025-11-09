@@ -11,8 +11,8 @@ const journeyPlanController = {
                jp.userId,
                jp.clientId,
                jp.status,
-               jp.checkInTime as checkInTime,
-               jp.checkoutTime as checkoutTime,
+               jp.checkInTime,
+               jp.checkoutTime,
                jp.latitude,
                jp.longitude,
                jp.imageUrl,
@@ -34,33 +34,120 @@ const journeyPlanController = {
         ORDER BY jp.date DESC, jp.time ASC
       `);
       
+      // Debug: Check what MySQL actually returns
+      if (plans && plans.length > 0) {
+        console.log('=== RAW MYSQL DATA ===');
+        console.log('First plan from MySQL (full object):', JSON.stringify(plans[0], null, 2));
+        console.log('Keys in first plan:', Object.keys(plans[0]));
+        const checkKeys = Object.keys(plans[0]).filter(k => 
+          k.toLowerCase().includes('check') || k.toLowerCase().includes('time')
+        );
+        console.log('Keys with "check" or "time":', checkKeys);
+        checkKeys.forEach(key => {
+          const value = plans[0][key];
+          console.log(`  ${key}:`, value, 'Type:', typeof value, 'IsNull:', value === null, 'IsUndefined:', value === undefined);
+        });
+        
+        // Check a few more plans to see if any have non-null checkInTime
+        const plansWithCheckIn = plans.filter(p => {
+          const checkIn = p.checkInTime || p.checkinTime || p.check_in_time || p.CheckInTime;
+          return checkIn != null && checkIn !== 'null' && checkIn !== '';
+        });
+        console.log(`Plans with non-null checkInTime in raw data: ${plansWithCheckIn.length} out of ${plans.length}`);
+        if (plansWithCheckIn.length > 0) {
+          console.log('Sample plan WITH checkInTime (raw):', JSON.stringify(plansWithCheckIn[0], null, 2));
+        }
+        console.log('=== END RAW MYSQL DATA ===');
+      }
+      
+      // Also check database directly for checkInTime statistics
+      try {
+        const [stats] = await db.query(`
+          SELECT 
+            COUNT(*) as total,
+            COUNT(checkInTime) as with_check_in,
+            COUNT(*) - COUNT(checkInTime) as without_check_in
+          FROM JourneyPlan
+          WHERE date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+        `);
+        console.log('=== DATABASE STATISTICS (last 30 days) ===');
+        console.log('Total journey plans:', stats[0]?.total || 0);
+        console.log('Plans with checkInTime:', stats[0]?.with_check_in || 0);
+        console.log('Plans without checkInTime:', stats[0]?.without_check_in || 0);
+        console.log('=== END DATABASE STATISTICS ===');
+      } catch (statsError) {
+        console.error('Error getting database statistics:', statsError);
+      }
+      
       // Normalize field names to camelCase (MySQL might return in different cases)
       const normalizedPlans = plans.map(plan => {
         const normalized = { ...plan };
         
-        // Normalize checkInTime (handle case variations)
-        if (plan.checkInTime !== undefined) {
-          normalized.checkInTime = plan.checkInTime;
-        } else if (plan.checkinTime !== undefined) {
-          normalized.checkInTime = plan.checkinTime;
-          delete normalized.checkinTime;
-        } else if (plan.check_in_time !== undefined) {
-          normalized.checkInTime = plan.check_in_time;
-          delete normalized.check_in_time;
-        } else if (plan.CheckInTime !== undefined) {
-          normalized.checkInTime = plan.CheckInTime;
-          delete normalized.CheckInTime;
+        // Get all keys from the plan object
+        const planKeys = Object.keys(plan);
+        
+        // Normalize checkInTime (handle case variations) - case-insensitive search
+        // MySQL might return column names in different cases depending on configuration
+        let checkInTimeValue = null;
+        let checkInTimeKey = null;
+        
+        // Check if 'checkInTime' exists as a key (even if value is null)
+        if ('checkInTime' in plan) {
+          checkInTimeKey = 'checkInTime';
+          checkInTimeValue = plan.checkInTime; // This can be null, and that's OK
+        } else {
+          // Case-insensitive search through all keys
+          // MySQL might return: checkInTime, checkinTime, CHECKINTIME, etc.
+          checkInTimeKey = planKeys.find(key => {
+            const keyNormalized = key.toLowerCase().replace(/[_-]/g, '');
+            return keyNormalized === 'checkintime';
+          });
+          
+          if (checkInTimeKey) {
+            checkInTimeValue = plan[checkInTimeKey];
+          }
         }
         
-        // Normalize checkoutTime (handle case variations)
-        if (plan.checkoutTime !== undefined) {
-          normalized.checkoutTime = plan.checkoutTime;
-        } else if (plan.checkout_time !== undefined) {
-          normalized.checkoutTime = plan.checkout_time;
-          delete normalized.checkout_time;
-        } else if (plan.CheckoutTime !== undefined) {
-          normalized.checkoutTime = plan.CheckoutTime;
-          delete normalized.CheckoutTime;
+        // Always set checkInTime in normalized object (even if null or undefined)
+        // This ensures the field exists in the response
+        normalized.checkInTime = checkInTimeValue;
+        
+        // Remove duplicate keys if we found it under a different name
+        if (checkInTimeKey && checkInTimeKey !== 'checkInTime') {
+          // Don't delete if it's the same object reference
+          if (checkInTimeKey in normalized && normalized[checkInTimeKey] !== normalized.checkInTime) {
+            delete normalized[checkInTimeKey];
+          }
+        }
+        
+        // Normalize checkoutTime (handle case variations) - case-insensitive search
+        let checkoutTimeValue = null;
+        let checkoutTimeKey = null;
+        
+        // Check if 'checkoutTime' exists as a key (even if value is null)
+        if ('checkoutTime' in plan) {
+          checkoutTimeKey = 'checkoutTime';
+          checkoutTimeValue = plan.checkoutTime; // This can be null, and that's OK
+        } else {
+          // Case-insensitive search through all keys
+          checkoutTimeKey = planKeys.find(key => {
+            const keyNormalized = key.toLowerCase().replace(/[_-]/g, '');
+            return keyNormalized === 'checkouttime';
+          });
+          
+          if (checkoutTimeKey) {
+            checkoutTimeValue = plan[checkoutTimeKey];
+          }
+        }
+        
+        // Always set checkoutTime in normalized object (even if null or undefined)
+        normalized.checkoutTime = checkoutTimeValue;
+        
+        // Remove duplicate keys if we found it under a different name
+        if (checkoutTimeKey && checkoutTimeKey !== 'checkoutTime') {
+          if (checkoutTimeKey in normalized && normalized[checkoutTimeKey] !== normalized.checkoutTime) {
+            delete normalized[checkoutTimeKey];
+          }
         }
         
         return normalized;
@@ -68,24 +155,73 @@ const journeyPlanController = {
       
       // Debug: Log sample data to see what's being returned
       if (normalizedPlans && normalizedPlans.length > 0) {
-        console.log('Sample journey plan (first record):', JSON.stringify(normalizedPlans[0], null, 2));
-        console.log('Sample journey plan keys:', Object.keys(normalizedPlans[0]));
-        // Count how many have checkInTime
-        const withCheckIn = normalizedPlans.filter(p => p.checkInTime).length;
-        const withCheckOut = normalizedPlans.filter(p => p.checkoutTime).length;
-        console.log(`Total plans: ${normalizedPlans.length}, Plans with checkInTime: ${withCheckIn}, Plans with checkoutTime: ${withCheckOut}`);
+        console.log('=== BACKEND: Journey Plans Normalization ===');
+        console.log('Total plans:', normalizedPlans.length);
+        
+        // Check raw data from database (before normalization)
+        if (plans && plans.length > 0) {
+          console.log('Raw plan keys (from DB):', Object.keys(plans[0]));
+          const rawKeysWithCheck = Object.keys(plans[0]).filter(k => 
+            k.toLowerCase().includes('check') || k.toLowerCase().includes('time')
+          );
+          console.log('Raw keys containing "check" or "time":', rawKeysWithCheck);
+          rawKeysWithCheck.forEach(key => {
+            console.log(`  Raw ${key}:`, plans[0][key], 'Type:', typeof plans[0][key]);
+          });
+        }
+        
+        // Check normalized data
+        console.log('Normalized plan keys:', Object.keys(normalizedPlans[0]));
+        const normalizedKeysWithCheck = Object.keys(normalizedPlans[0]).filter(k => 
+          k.toLowerCase().includes('check') || k.toLowerCase().includes('time')
+        );
+        console.log('Normalized keys containing "check" or "time":', normalizedKeysWithCheck);
+        normalizedKeysWithCheck.forEach(key => {
+          console.log(`  Normalized ${key}:`, normalizedPlans[0][key], 'Type:', typeof normalizedPlans[0][key]);
+        });
+        
+        // Count how many have checkInTime (including null checks)
+        const withCheckIn = normalizedPlans.filter(p => {
+          const hasValue = p.checkInTime != null && p.checkInTime !== '' && p.checkInTime !== 'null';
+          return hasValue;
+        }).length;
+        const withCheckOut = normalizedPlans.filter(p => {
+          const hasValue = p.checkoutTime != null && p.checkoutTime !== '' && p.checkoutTime !== 'null';
+          return hasValue;
+        }).length;
+        const withNullCheckIn = normalizedPlans.filter(p => p.checkInTime === null || p.checkInTime === undefined).length;
+        console.log(`Plans with checkInTime (non-null): ${withCheckIn}, Plans with null checkInTime: ${withNullCheckIn}, Plans with checkoutTime: ${withCheckOut}`);
         
         // Log a sample that has checkInTime if available
-        const sampleWithCheckIn = normalizedPlans.find(p => p.checkInTime);
+        const sampleWithCheckIn = normalizedPlans.find(p => {
+          return p.checkInTime != null && p.checkInTime !== '' && p.checkInTime !== 'null';
+        });
         if (sampleWithCheckIn) {
-          console.log('Sample plan with checkInTime:', {
+          console.log('Sample plan WITH checkInTime:', JSON.stringify({
             id: sampleWithCheckIn.id,
+            userId: sampleWithCheckIn.userId,
             clientId: sampleWithCheckIn.clientId,
+            date: sampleWithCheckIn.date,
             checkInTime: sampleWithCheckIn.checkInTime,
             checkoutTime: sampleWithCheckIn.checkoutTime,
             checkInTimeType: typeof sampleWithCheckIn.checkInTime
-          });
+          }, null, 2));
+        } else {
+          console.log('WARNING: No plans found with non-null checkInTime after normalization!');
+          // Show first few plans to debug
+          console.log('First 5 normalized plans sample:', normalizedPlans.slice(0, 5).map(p => ({
+            id: p.id,
+            userId: p.userId,
+            date: p.date,
+            checkInTime: p.checkInTime,
+            checkInTimeType: typeof p.checkInTime,
+            checkInTimeIsNull: p.checkInTime === null,
+            checkInTimeIsUndefined: p.checkInTime === undefined,
+            hasCheckInTimeKey: 'checkInTime' in p,
+            allKeys: Object.keys(p)
+          })));
         }
+        console.log('=== END BACKEND DEBUG ===');
       }
       
       res.json({ success: true, data: normalizedPlans });

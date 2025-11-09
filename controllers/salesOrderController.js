@@ -2,18 +2,32 @@ const db = require('../database/db');
 const { DateTime } = require('luxon');
 
 const salesOrderController = {
-  // Get all sales orders
+  // Get all sales orders (optimized with pagination, server-side filtering, and bulk item fetching)
   getAllSalesOrders: async (req, res) => {
     try {
-      console.log('Fetching sales orders with filters:', req.query);
+      const { 
+        client_id, 
+        status, 
+        search,
+        date_from,
+        date_to,
+        page = 1,
+        limit = 50,
+        include_items = 'false'
+      } = req.query;
       
-      const { client_id, status } = req.query;
-      let whereClause = 'WHERE so.my_status IN (1, 2, 3)';
+      // Pagination
+      const pageNum = parseInt(page) || 1;
+      const limitNum = Math.min(parseInt(limit) || 10, 100); // Default 10, max 100 per page
+      const offset = (pageNum - 1) * limitNum;
+      
+      // Build WHERE clause
+      let whereConditions = ['so.my_status IN (1, 2, 3)'];
       let queryParams = [];
       
       // Add client_id filter if provided
       if (client_id) {
-        whereClause += ' AND so.customer_id = ?';
+        whereConditions.push('so.customer_id = ?');
         queryParams.push(client_id);
       }
       
@@ -21,19 +35,50 @@ const salesOrderController = {
       if (status) {
         const statusArray = status.split(',').map(s => s.trim());
         const placeholders = statusArray.map(() => '?').join(',');
-        whereClause = whereClause.replace('so.my_status IN (1, 2, 3)', `so.my_status IN (${placeholders})`);
+        whereConditions[0] = `so.my_status IN (${placeholders})`;
         queryParams = [...statusArray, ...queryParams];
       }
       
-      console.log('Final WHERE clause:', whereClause);
-      console.log('Query parameters:', queryParams);
+      // Add search filter (SO number, customer name, sales rep)
+      if (search) {
+        whereConditions.push(`(
+          so.so_number LIKE ? OR 
+          c.name LIKE ? OR
+          sr.name LIKE ?
+        )`);
+        const searchTerm = `%${search}%`;
+        queryParams.push(searchTerm, searchTerm, searchTerm);
+      }
       
+      // Add date filters
+      if (date_from) {
+        whereConditions.push('so.order_date >= ?');
+        queryParams.push(date_from);
+      }
+      if (date_to) {
+        whereConditions.push('so.order_date <= ?');
+        queryParams.push(date_to);
+      }
+      
+      const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
+      
+      // Get total count for pagination
+      const [countResult] = await db.query(`
+        SELECT COUNT(DISTINCT so.id) as total
+        FROM sales_orders so
+        LEFT JOIN Clients c ON so.customer_id = c.id
+        LEFT JOIN SalesRep sr ON so.salesrep = sr.id
+        ${whereClause}
+      `, queryParams);
+      const total = countResult[0].total;
+      
+      // Fetch sales orders with pagination
       const [rows] = await db.query(`
         SELECT 
           so.*, 
-          so.name as customer_name, 
-          so.phone as customer_phone,
-          so.address as customer_address,
+          c.name as customer_name, 
+          c.phone as customer_phone,
+          c.address as customer_address,
           c.balance as customer_balance,
           u.full_name as created_by_name,
           sr.name as salesrep,
@@ -45,17 +90,14 @@ const salesOrderController = {
         LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         ${whereClause}
         ORDER BY so.created_at DESC
-      `, queryParams);
+        LIMIT ? OFFSET ?
+      `, [...queryParams, limitNum, offset]);
       
-      console.log('Query result rows:', rows.length);
-      if (rows.length > 0) {
-        console.log('Sample order:', rows[0]);
-        console.log('Sample order my_status:', rows[0].my_status);
-      }
-      
-      // Get items for each sales order
-      for (let order of rows) {
-        const [items] = await db.query(`
+      // Fetch items in bulk if requested (optimized N+1 fix)
+      if (include_items === 'true' && rows.length > 0) {
+        const orderIds = rows.map(o => o.id);
+        const placeholders = orderIds.map(() => '?').join(',');
+        const [allItems] = await db.query(`
           SELECT 
             soi.*, 
             p.product_name, 
@@ -64,39 +106,58 @@ const salesOrderController = {
             p.cylinder_type
           FROM sales_order_items soi
           LEFT JOIN products p ON soi.product_id = p.id
-          WHERE soi.sales_order_id = ?
-        `, [order.id]);
+          WHERE soi.sales_order_id IN (${placeholders})
+          ORDER BY soi.sales_order_id, soi.id
+        `, orderIds);
         
-        // Map product fields into a product object for each item
-        order.items = items.map(item => ({
-          id: item.id,
-          sales_order_id: item.sales_order_id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit_price: parseFloat(item.unit_price),
-          total_price: parseFloat(item.total_price),
-          tax_type: item.tax_type,
-          tax_amount: parseFloat(item.tax_amount),
-          net_price: parseFloat(item.net_price),
-          order_notes: item.order_notes,
-          product: {
-            id: item.product_id,
-            product_name: item.product_name || `Product ${item.product_id}`,
-            product_code: item.product_code || 'No Code',
-            unit_of_measure: item.unit_of_measure || 'PCS',
-            cylinder_type: item.cylinder_type
+        // Group items by sales_order_id
+        const itemsByOrderId = {};
+        allItems.forEach(item => {
+          if (!itemsByOrderId[item.sales_order_id]) {
+            itemsByOrderId[item.sales_order_id] = [];
           }
-        }));
+          itemsByOrderId[item.sales_order_id].push({
+            id: item.id,
+            sales_order_id: item.sales_order_id,
+            product_id: item.product_id,
+            quantity: item.quantity,
+            unit_price: parseFloat(item.unit_price),
+            total_price: parseFloat(item.total_price),
+            tax_type: item.tax_type,
+            tax_amount: parseFloat(item.tax_amount),
+            net_price: parseFloat(item.net_price),
+            order_notes: item.order_notes,
+            product: {
+              id: item.product_id,
+              product_name: item.product_name || `Product ${item.product_id}`,
+              product_code: item.product_code || 'No Code',
+              unit_of_measure: item.unit_of_measure || 'PCS',
+              cylinder_type: item.cylinder_type
+            }
+          });
+        });
+        
+        // Attach items to orders
+        rows.forEach(order => {
+          order.items = itemsByOrderId[order.id] || [];
+        });
+      } else {
+        // Set empty items array if not requested
+        rows.forEach(order => {
+          order.items = [];
+        });
       }
       
-      console.log('Final response data length:', rows.length);
-      console.log('Orders by status:');
-      const statusCounts = rows.reduce((acc, order) => {
-        acc[order.my_status] = (acc[order.my_status] || 0) + 1;
-        return acc;
-      }, {});
-      console.log(statusCounts);
-      res.json({ success: true, data: rows });
+      res.json({ 
+        success: true, 
+        data: rows,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: total,
+          totalPages: Math.ceil(total / limitNum)
+        }
+      });
     } catch (error) {
       console.error('Error fetching sales orders:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch sales orders' });

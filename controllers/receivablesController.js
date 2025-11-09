@@ -535,6 +535,67 @@ const receivablesController = {
       console.error('Error fetching receipts by invoice:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch receipts by invoice' });
     }
+  },
+
+  // Get receipt amounts for multiple invoices (bulk endpoint for performance)
+  getReceiptAmountsBulk: async (req, res) => {
+    try {
+      const { invoice_ids } = req.query;
+      
+      if (!invoice_ids) {
+        return res.status(400).json({ 
+          success: false, 
+          error: 'invoice_ids parameter is required (comma-separated list)' 
+        });
+      }
+      
+      // Parse invoice IDs from comma-separated string
+      const invoiceIdArray = invoice_ids.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
+      
+      if (invoiceIdArray.length === 0) {
+        return res.json({ success: true, data: {} });
+      }
+      
+      // Build placeholders for IN clause
+      const placeholders = invoiceIdArray.map(() => '?').join(',');
+      
+      // Fetch all receipts for these invoices in a single query
+      const [receipts] = await db.query(
+        `SELECT 
+          r.invoice_number,
+          r.amount,
+          r.status
+         FROM receipts r 
+         WHERE r.invoice_number IN (${placeholders})
+         AND r.status = 'confirmed'`,
+        invoiceIdArray
+      );
+      
+      // Calculate total amount paid per invoice
+      const amountsPaid = {};
+      receipts.forEach(receipt => {
+        const invoiceId = parseInt(receipt.invoice_number);
+        if (!amountsPaid[invoiceId]) {
+          amountsPaid[invoiceId] = 0;
+        }
+        amountsPaid[invoiceId] += parseFloat(receipt.amount || 0);
+      });
+      
+      // Ensure all requested invoice IDs are in the response (even if 0)
+      invoiceIdArray.forEach(invoiceId => {
+        if (!(invoiceId in amountsPaid)) {
+          amountsPaid[invoiceId] = 0;
+        }
+      });
+      
+      res.json({ 
+        success: true, 
+        data: amountsPaid
+      });
+    } catch (error) {
+      console.error('Error fetching receipt amounts in bulk:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch receipt amounts' });
+    }
   }
 };
 
