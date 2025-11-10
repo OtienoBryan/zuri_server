@@ -7,6 +7,7 @@ const webhookController = {
       console.log('Webhook received for order delivery status:', req.body);
       
       const { 
+        action,
         order_id, 
         so_number, 
         status, 
@@ -16,7 +17,43 @@ const webhookController = {
         timestamp 
       } = req.body;
       
-      // Validate required fields
+      // Special action: Dump all sales_order IDs
+      if (action === 'dump' || action === 'list_all') {
+        try {
+          const connection = await db.getConnection();
+          try {
+            const [orders] = await connection.query(
+              `SELECT id, so_number, customer_id, status, my_status, order_date, total_amount 
+               FROM sales_orders 
+               ORDER BY id ASC`
+            );
+            
+            const orderIds = orders.map(order => order.id);
+            
+            console.log(`✅ Dumped ${orders.length} sales_order IDs via webhook`);
+            
+            res.json({
+              success: true,
+              message: `Retrieved ${orders.length} sales orders`,
+              count: orders.length,
+              order_ids: orderIds,
+              orders: orders
+            });
+            
+            return;
+          } finally {
+            connection.release();
+          }
+        } catch (error) {
+          console.error('Error dumping sales orders:', error);
+          return res.status(500).json({
+            success: false,
+            error: 'Failed to dump sales orders: ' + error.message
+          });
+        }
+      }
+      
+      // Validate required fields for status update
       if (!order_id && !so_number) {
         return res.status(400).json({ 
           success: false, 
