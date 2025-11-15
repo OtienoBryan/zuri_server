@@ -408,15 +408,14 @@ router.get('/regions', async (req, res) => {
 // Cylinder Codes Route
 router.get('/cylinder-codes', async (req, res) => {
   try {
-    // Only fetch cylinders that are REFILLED and ready for assignment
+    // Fetch all cylinder codes without any constraints
     const [cylinderCodes] = await db.query(`
       SELECT id, code 
       FROM cylinder_codes 
-      WHERE status = 'REFILLED'
       ORDER BY code ASC
     `);
     
-    console.log(`Fetched ${cylinderCodes.length} refilled cylinder codes`);
+    console.log(`Fetched ${cylinderCodes.length} cylinder codes`);
     res.json({ success: true, data: cylinderCodes });
   } catch (error) {
     console.error('Error fetching cylinder codes:', error);

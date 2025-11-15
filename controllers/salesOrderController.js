@@ -818,7 +818,7 @@ const salesOrderController = {
           await connection.query(`
             INSERT INTO sales_order_items (
               sales_order_id, product_id, quantity, unit_price, tax_amount, total_price, tax_type, net_price
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           `, [id, item.product_id, item.quantity, item.unit_price, itemTax, totalPrice, item.tax_type || '16%', net]);
         }
         }
@@ -986,7 +986,7 @@ const salesOrderController = {
       await connection.beginTransaction();
       
       const { id } = req.params;
-      const { riderId, regionId, cylinderCodeId } = req.body;
+      const { riderId, regionId, cylinderCodeId, cylinderAssignments } = req.body;
       
       if (!riderId) {
         return res.status(400).json({ success: false, error: 'riderId is required' });
@@ -996,8 +996,17 @@ const salesOrderController = {
         return res.status(400).json({ success: false, error: 'regionId is required' });
       }
       
-      if (!cylinderCodeId) {
-        return res.status(400).json({ success: false, error: 'cylinderCodeId is required' });
+      // Support both old format (single cylinderCodeId) and new format (array of assignments)
+      let assignments = [];
+      if (cylinderAssignments && Array.isArray(cylinderAssignments) && cylinderAssignments.length > 0) {
+        assignments = cylinderAssignments.filter(a => a.cylinderCodeId && a.productId);
+      } else if (cylinderCodeId) {
+        // Backward compatibility: convert single cylinderCodeId to array format
+        assignments = [{ cylinderCodeId, productId: null }];
+      }
+      
+      if (assignments.length === 0) {
+        return res.status(400).json({ success: false, error: 'At least one cylinder code with product assignment is required' });
       }
       
       // Check if sales order exists and get its details
@@ -1147,38 +1156,43 @@ const salesOrderController = {
       const nairobiTime = DateTime.now().setZone('Africa/Nairobi');
       const nairobiTimestamp = nairobiTime.toFormat('yyyy-MM-dd HH:mm:ss');
       
-      // Update the sales order with the rider ID, region ID, cylinder code ID, set my_status to 2, assigned_at to now, and dispatched_by to current user
-      const now = new Date();
-      await connection.query(
-        'UPDATE sales_orders SET rider_id = ?, region_id = ?, cylinder_code_id = ?, my_status = 2, assigned_at = ?, dispatched_by = ? WHERE id = ?', 
-        [riderId, regionId, cylinderCodeId, now, currentUserId, id]
-      );
+      // Get additional details for the ledger
+      const [orderDetails] = await connection.query(`
+        SELECT 
+          so.customer_id,
+          so.so_number,
+          so.name as customer_name,
+          r.name as rider_name
+        FROM sales_orders so
+        LEFT JOIN Clients c ON so.customer_id = c.id
+        LEFT JOIN Riders r ON so.rider_id = r.id
+        WHERE so.id = ?
+      `, [id]);
       
-      // Update cylinder_codes table with current region, assignment date, and status (using Nairobi timezone)
-      await connection.query(
-        'UPDATE cylinder_codes SET current_region = ?, last_assigned_date = ?, status = ? WHERE id = ?',
-        [regionId, nairobiTimestamp, 'AVAILABLE', cylinderCodeId]
-      );
+      const order = orderDetails[0];
+      const performedByName = req.user?.full_name || req.user?.username || 'System';
       
-      // Log cylinder movement in ledger
-      try {
-        // Get additional details for the ledger
-        const [orderDetails] = await connection.query(`
-          SELECT 
-            so.customer_id,
-            so.so_number,
-            so.name as customer_name,
-            r.name as rider_name
-          FROM sales_orders so
-          LEFT JOIN Clients c ON so.customer_id = c.id
-          LEFT JOIN Riders r ON so.rider_id = r.id
-          WHERE so.id = ?
-        `, [id]);
+      // Get product names for notes
+      const productNames = {};
+      for (const assignment of assignments) {
+        if (assignment.productId) {
+          const [product] = await connection.query(
+            'SELECT product_name FROM products WHERE id = ?',
+            [assignment.productId]
+          );
+          if (product.length > 0) {
+            productNames[assignment.productId] = product[0].product_name;
+          }
+        }
+      }
+      
+      // Process each cylinder assignment
+      const firstCylinderCodeId = assignments[0].cylinderCodeId;
+      
+      for (const assignment of assignments) {
+        const { cylinderCodeId, productId } = assignment;
         
-        const order = orderDetails[0];
-        const performedByName = req.user?.full_name || req.user?.username || 'System';
-        
-        // Get previous region (if any) from cylinder_codes
+        // Get previous region (if any) from cylinder_codes BEFORE updating
         const [prevCylinder] = await connection.query(
           'SELECT current_region FROM cylinder_codes WHERE id = ?',
           [cylinderCodeId]
@@ -1186,48 +1200,72 @@ const salesOrderController = {
         
         const fromRegionId = prevCylinder.length > 0 ? prevCylinder[0].current_region : null;
         
-        await connection.query(`
-          INSERT INTO cylinder_ledger (
-            cylinder_code_id,
-            transaction_type,
-            sales_order_id,
-            so_number,
-            from_region_id,
-            to_region_id,
-            current_region_id,
-            rider_id,
-            rider_name,
-            customer_id,
-            customer_name,
-            transaction_date,
-            notes,
-            performed_by,
-            performed_by_name,
-            status_before,
-            status_after
-          ) VALUES (?, 'ASSIGNED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REFILLED', 'AVAILABLE')
-        `, [
-          cylinderCodeId,
-          id,
-          order.so_number,
-          fromRegionId,
-          regionId,
-          regionId,
-          riderId,
-          order.rider_name,
-          order.customer_id,
-          order.customer_name,
-          nairobiTimestamp,
-          `Cylinder assigned to order ${order.so_number} for delivery to ${order.customer_name}`,
-          currentUserId,
-          performedByName
-        ]);
+        // Update cylinder_codes table with current region, assignment date, and status
+        await connection.query(
+          'UPDATE cylinder_codes SET current_region = ?, last_assigned_date = ?, status = ? WHERE id = ?',
+          [regionId, nairobiTimestamp, 'AVAILABLE', cylinderCodeId]
+        );
         
-        console.log(`✅ Cylinder movement logged in ledger`);
-      } catch (ledgerError) {
-        console.error('⚠️ Warning: Could not log to cylinder_ledger:', ledgerError.message);
-        // Don't fail the entire transaction if ledger logging fails
+        console.log(`✅ Updated cylinder ${cylinderCodeId} with region ${regionId}`);
+        
+        // Create note with product information if available
+        let notes = `Cylinder assigned to order ${order.so_number} for delivery to ${order.customer_name}`;
+        if (productId && productNames[productId]) {
+          notes += ` (Product: ${productNames[productId]})`;
+        }
+        
+        // Log cylinder movement in ledger
+        try {
+          await connection.query(`
+            INSERT INTO cylinder_ledger (
+              cylinder_code_id,
+              transaction_type,
+              sales_order_id,
+              so_number,
+              from_region_id,
+              to_region_id,
+              current_region_id,
+              rider_id,
+              rider_name,
+              customer_id,
+              customer_name,
+              transaction_date,
+              notes,
+              performed_by,
+              performed_by_name,
+              status_before,
+              status_after
+            ) VALUES (?, 'ASSIGNED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'REFILLED', 'AVAILABLE')
+          `, [
+            cylinderCodeId,
+            id,
+            order.so_number,
+            fromRegionId,
+            regionId,
+            regionId,
+            riderId,
+            order.rider_name,
+            order.customer_id,
+            order.customer_name,
+            nairobiTimestamp,
+            notes,
+            currentUserId,
+            performedByName
+          ]);
+          
+          console.log(`✅ Cylinder ${cylinderCodeId} movement logged in ledger`);
+        } catch (ledgerError) {
+          console.error(`⚠️ Warning: Could not log cylinder ${cylinderCodeId} to cylinder_ledger:`, ledgerError.message);
+          // Don't fail the entire transaction if ledger logging fails
+        }
       }
+      
+      // Update the sales order with the rider ID, region ID, first cylinder code ID (for backward compatibility), set my_status to 2, assigned_at to now, and dispatched_by to current user
+      const now = new Date();
+      await connection.query(
+        'UPDATE sales_orders SET rider_id = ?, region_id = ?, cylinder_code_id = ?, my_status = 2, assigned_at = ?, dispatched_by = ? WHERE id = ?', 
+        [riderId, regionId, firstCylinderCodeId, now, currentUserId, id]
+      );
       
       await connection.commit();
       console.log(`✅ Rider assigned successfully to order ${salesOrder.so_number || id}. Inventory reduced.`);
