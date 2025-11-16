@@ -12,7 +12,7 @@ process.env.TZ = 'UTC';
 process.env.NODE_TZ = 'UTC';
 
 // Try to require database and other modules, but don't crash if they fail
-let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, locationsRoutes, webhookRoutes;
+let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, locationsRoutes, webhookRoutes, outletStockPlanRoutes, competitorRoutes;
 
 try {
   db = require('./database/db');
@@ -39,6 +39,7 @@ try {
   userRoutes = require('./routes/userRoutes');
   loginHistoryRoutes = require('./routes/loginHistoryRoutes');
   journeyPlanRoutes = require('./routes/journeyPlanRoutes');
+  outletStockPlanRoutes = require('./routes/outletStockPlanRoutes');
   salesRepRoutes = require('./routes/salesRepRoutes');
   visibilityReportRoutes = require('./routes/visibilityReportRoutes');
   riderRoutes = require('./routes/riderRoutes');
@@ -57,6 +58,7 @@ try {
   routesRoutes = require('./routes/routesRoutes');
   locationsRoutes = require('./routes/locationsRoutes');
   webhookRoutes = require('./routes/webhookRoutes');
+  competitorRoutes = require('./routes/competitorRoutes');
 } catch (error) {
   console.log('Some modules failed to load:', error.message);
 }
@@ -485,6 +487,9 @@ app.delete('/api/clients/:clientId/service-charges/:chargeId', serviceChargeCont
 // Journey Plan routes
 app.use('/api/journey-plans', journeyPlanRoutes);
 
+// Outlet Stock Plan routes
+app.use('/api/outlet-stock-plans', outletStockPlanRoutes);
+
 // Sales Representative routes
 app.use('/api/sales-reps', salesRepRoutes);
 
@@ -515,6 +520,7 @@ app.use('/api/my-assets', myAssetsRoutes);
   app.use('/api/asset-assignments', assetAssignmentRoutes);
   app.use('/api/merchandise', merchandiseRoutes);
   app.use('/api/webhooks', webhookRoutes);
+  app.use('/api/competitors', competitorRoutes);
 
 app.use('/api/sales-rep-leaves', salesRepLeaveRoutes);
 app.use('/api/calendar-tasks', calendarTaskRoutes);
@@ -1294,10 +1300,10 @@ app.get('/api/availability-countries', async (req, res) => {
     // Try to query the table, return empty array if table doesn't exist
     try {
       const sql = `
-        SELECT DISTINCT COALESCE(c.name, ar.outlet) AS outlet_name, ar.outlet_id
+        SELECT DISTINCT COALESCE(NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name, ar.outlet_id
         FROM \`asset_report\` ar
-        LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
-        WHERE (c.name IS NOT NULL AND c.name != '') OR (ar.outlet IS NOT NULL AND ar.outlet != '')
+        LEFT JOIN \`locations\` l ON ar.outlet_id = l.id
+        WHERE (l.name IS NOT NULL AND l.name != '') OR (ar.outlet IS NOT NULL AND ar.outlet != '')
         ORDER BY outlet_name ASC
       `;
       

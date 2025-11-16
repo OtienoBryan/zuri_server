@@ -4,35 +4,90 @@ const journeyPlanController = {
   // Get all journey plans
   getAllJourneyPlans: async (req, res) => {
     try {
-      const [plans] = await db.query(`
-        SELECT jp.id,
-               jp.date,
-               jp.time,
-               jp.userId,
-               jp.clientId,
-               jp.status,
-               jp.checkInTime,
-               jp.checkoutTime,
-               jp.latitude,
-               jp.longitude,
-               jp.imageUrl,
-               jp.notes,
-               jp.checkoutLatitude,
-               jp.checkoutLongitude,
-               jp.showUpdateLocation,
-               jp.routeId,
-               jp.createdAt,
-               jp.updatedAt,
-               s.name as user_name,
-               c.name as client_name,
-               c.name as client_company_name,
-               r.name as route_name
-        FROM JourneyPlan jp
-        LEFT JOIN SalesRep s ON jp.userId = s.id
-        LEFT JOIN Clients c ON jp.clientId = c.id
-        LEFT JOIN routes r ON jp.routeId = r.id
-        ORDER BY jp.date DESC, jp.time ASC
-      `);
+      const { startDate, endDate } = req.query;
+      
+      console.log('=== getAllJourneyPlans called ===');
+      console.log('Query params:', { startDate, endDate });
+      
+      let dateFilter = '';
+      const params = [];
+      
+      // Default to current date if no date filter provided
+      const today = new Date().toISOString().slice(0, 10);
+      
+      if (startDate && endDate) {
+        dateFilter = 'AND DATE(jp.date) BETWEEN ? AND ?';
+        params.push(startDate, endDate);
+        console.log('Using date range filter:', startDate, 'to', endDate);
+      } else if (startDate) {
+        dateFilter = 'AND DATE(jp.date) >= ?';
+        params.push(startDate);
+        console.log('Using start date filter:', startDate);
+      } else if (endDate) {
+        dateFilter = 'AND DATE(jp.date) <= ?';
+        params.push(endDate);
+        console.log('Using end date filter:', endDate);
+      } else {
+        // Default to current date if no filter provided
+        dateFilter = 'AND DATE(jp.date) = ?';
+        params.push(today);
+        console.log('No date filter provided, defaulting to current date:', today);
+      }
+      
+      // Check if we need detailed records (for visit details modal)
+      const { userId: requestedUserId } = req.query;
+      const needDetails = requestedUserId !== undefined;
+      
+      // Group by sales rep and date, showing first checkInTime and last checkoutTime
+      // Exclude records where status = 0 (Pending)
+      const whereClause = `WHERE jp.status != 0 ${dateFilter}`;
+      
+      let query = '';
+      
+      if (needDetails) {
+        // Return individual records for visit details modal
+        query = `
+          SELECT 
+                 jp.id,
+                 DATE(jp.date) as date,
+                 jp.userId,
+                 jp.checkInTime,
+                 jp.checkoutTime,
+                 jp.imageUrl,
+                 sr.name as user_name,
+                 c.name as client_name,
+                 c.name as client_company_name
+          FROM JourneyPlan jp
+          LEFT JOIN SalesRep sr ON jp.userId = sr.id
+          LEFT JOIN locations c ON jp.clientId = c.id
+          ${whereClause} AND jp.userId = ?
+          ORDER BY jp.checkInTime ASC
+        `;
+        params.push(requestedUserId);
+      } else {
+        // Return grouped summary data
+        query = `
+          SELECT 
+                 DATE(jp.date) as date,
+                 jp.userId,
+                 sr.name as user_name,
+                 MIN(jp.checkInTime) as first_checkInTime,
+                 MAX(jp.checkoutTime) as last_checkoutTime,
+                 COUNT(jp.id) as total_visits
+          FROM JourneyPlan jp
+          LEFT JOIN SalesRep sr ON jp.userId = sr.id
+          ${whereClause}
+          GROUP BY DATE(jp.date), jp.userId, sr.name
+          ORDER BY DATE(jp.date) DESC, sr.name ASC
+        `;
+      }
+      
+      console.log('Executing query with params:', params);
+      console.log('Query:', query);
+      
+      const [plans] = await db.query(query, params);
+      
+      console.log('Query executed successfully. Plans count:', plans ? plans.length : 0);
       
       // Debug: Check what MySQL actually returns
       if (plans && plans.length > 0) {
@@ -83,71 +138,14 @@ const journeyPlanController = {
       const normalizedPlans = plans.map(plan => {
         const normalized = { ...plan };
         
-        // Get all keys from the plan object
-        const planKeys = Object.keys(plan);
-        
-        // Normalize checkInTime (handle case variations) - case-insensitive search
-        // MySQL might return column names in different cases depending on configuration
-        let checkInTimeValue = null;
-        let checkInTimeKey = null;
-        
-        // Check if 'checkInTime' exists as a key (even if value is null)
-        if ('checkInTime' in plan) {
-          checkInTimeKey = 'checkInTime';
-          checkInTimeValue = plan.checkInTime; // This can be null, and that's OK
+        if (needDetails) {
+          // For detailed records, normalize checkInTime and checkoutTime
+          normalized.checkInTime = plan.checkInTime || plan.checkinTime || plan.check_in_time || null;
+          normalized.checkoutTime = plan.checkoutTime || plan.checkouttime || plan.check_out_time || null;
         } else {
-          // Case-insensitive search through all keys
-          // MySQL might return: checkInTime, checkinTime, CHECKINTIME, etc.
-          checkInTimeKey = planKeys.find(key => {
-            const keyNormalized = key.toLowerCase().replace(/[_-]/g, '');
-            return keyNormalized === 'checkintime';
-          });
-          
-          if (checkInTimeKey) {
-            checkInTimeValue = plan[checkInTimeKey];
-          }
-        }
-        
-        // Always set checkInTime in normalized object (even if null or undefined)
-        // This ensures the field exists in the response
-        normalized.checkInTime = checkInTimeValue;
-        
-        // Remove duplicate keys if we found it under a different name
-        if (checkInTimeKey && checkInTimeKey !== 'checkInTime') {
-          // Don't delete if it's the same object reference
-          if (checkInTimeKey in normalized && normalized[checkInTimeKey] !== normalized.checkInTime) {
-            delete normalized[checkInTimeKey];
-          }
-        }
-        
-        // Normalize checkoutTime (handle case variations) - case-insensitive search
-        let checkoutTimeValue = null;
-        let checkoutTimeKey = null;
-        
-        // Check if 'checkoutTime' exists as a key (even if value is null)
-        if ('checkoutTime' in plan) {
-          checkoutTimeKey = 'checkoutTime';
-          checkoutTimeValue = plan.checkoutTime; // This can be null, and that's OK
-        } else {
-          // Case-insensitive search through all keys
-          checkoutTimeKey = planKeys.find(key => {
-            const keyNormalized = key.toLowerCase().replace(/[_-]/g, '');
-            return keyNormalized === 'checkouttime';
-          });
-          
-          if (checkoutTimeKey) {
-            checkoutTimeValue = plan[checkoutTimeKey];
-          }
-        }
-        
-        // Always set checkoutTime in normalized object (even if null or undefined)
-        normalized.checkoutTime = checkoutTimeValue;
-        
-        // Remove duplicate keys if we found it under a different name
-        if (checkoutTimeKey && checkoutTimeKey !== 'checkoutTime') {
-          if (checkoutTimeKey in normalized && normalized[checkoutTimeKey] !== normalized.checkoutTime) {
-            delete normalized[checkoutTimeKey];
-          }
+          // For grouped records, normalize first_checkInTime and last_checkoutTime
+          normalized.first_checkInTime = plan.first_checkInTime || plan.first_checkintime || plan.firstCheckInTime || null;
+          normalized.last_checkoutTime = plan.last_checkoutTime || plan.last_checkouttime || plan.lastCheckoutTime || null;
         }
         
         return normalized;
@@ -226,8 +224,27 @@ const journeyPlanController = {
       
       res.json({ success: true, data: normalizedPlans });
     } catch (error) {
-      console.error('Get all journey plans error:', error);
-      res.status(500).json({ success: false, message: 'Failed to fetch journey plans', error: error.message });
+      console.error('=== ERROR in getAllJourneyPlans ===');
+      console.error('Error message:', error.message);
+      console.error('Error stack:', error.stack);
+      console.error('Error code:', error.code);
+      console.error('Error errno:', error.errno);
+      console.error('Error sqlState:', error.sqlState);
+      console.error('Error sqlMessage:', error.sqlMessage);
+      console.error('Full error object:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
+      console.error('=== END ERROR ===');
+      
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to fetch journey plans', 
+        error: error.message,
+        details: process.env.NODE_ENV === 'development' ? {
+          code: error.code,
+          errno: error.errno,
+          sqlState: error.sqlState,
+          sqlMessage: error.sqlMessage
+        } : undefined
+      });
     }
   },
 
@@ -239,10 +256,9 @@ const journeyPlanController = {
         SELECT jp.*, 
                c.name as client_name,
                c.name as client_company_name,
-               c.address as client_address,
                r.name as route_name
         FROM JourneyPlan jp
-        LEFT JOIN Clients c ON jp.clientId = c.id
+        LEFT JOIN locations c ON jp.clientId = c.id
         LEFT JOIN routes r ON jp.routeId = r.id
         WHERE jp.userId = ?
         ORDER BY jp.date ASC, jp.time ASC
@@ -264,13 +280,10 @@ const journeyPlanController = {
                s.name as user_name,
                c.name as client_name,
                c.name as client_company_name,
-               c.address as client_address,
-               c.email as client_email,
-               c.contact as client_contact,
                r.name as route_name
         FROM JourneyPlan jp
         LEFT JOIN SalesRep s ON jp.userId = s.id
-        LEFT JOIN Clients c ON jp.clientId = c.id
+        LEFT JOIN locations c ON jp.clientId = c.id
         LEFT JOIN routes r ON jp.routeId = r.id
         WHERE jp.id = ?
       `, [id]);
@@ -323,10 +336,10 @@ const journeyPlanController = {
         SELECT jp.*, 
                u.name as user_name,
                c.name as client_name,
-               c.company_name as client_company_name
+               c.name as client_company_name
         FROM JourneyPlan jp
         LEFT JOIN users u ON jp.userId = u.id
-        LEFT JOIN Clients c ON jp.clientId = c.id
+        LEFT JOIN locations c ON jp.clientId = c.id
         WHERE jp.id = ?
       `, [result.insertId]);
 
@@ -396,10 +409,10 @@ const journeyPlanController = {
         SELECT jp.*, 
                u.name as user_name,
                c.name as client_name,
-               c.company_name as client_company_name
+               c.name as client_company_name
         FROM JourneyPlan jp
         LEFT JOIN users u ON jp.userId = u.id
-        LEFT JOIN Clients c ON jp.clientId = c.id
+        LEFT JOIN locations c ON jp.clientId = c.id
         WHERE jp.id = ?
       `, [id]);
 
