@@ -294,7 +294,11 @@ const receivablesController = {
   listReceipts: async (req, res) => {
     try {
       const { status } = req.query;
-             let query = `SELECT r.*, c.name as client_name, coa.account_name FROM receipts r LEFT JOIN Clients c ON r.client_id = c.id LEFT JOIN chart_of_accounts coa ON r.account_id = coa.id`;
+      let query = `SELECT r.*, COALESCE(so.name, c.name) as client_name, coa.account_name 
+                   FROM receipts r 
+                   LEFT JOIN sales_orders so ON r.invoice_number = so.id 
+                   LEFT JOIN Clients c ON r.client_id = c.id 
+                   LEFT JOIN chart_of_accounts coa ON r.account_id = coa.id`;
       const params = [];
       if (status) {
         query += ' WHERE r.status = ?';
@@ -306,6 +310,28 @@ const receivablesController = {
     } catch (error) {
       console.error('Error fetching receipts:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch receipts' });
+    }
+  },
+
+  // Get receipt by ID
+  getReceiptById: async (req, res) => {
+    try {
+      const { id } = req.params;
+      const [rows] = await db.query(
+        `SELECT r.*, c.name as client_name, coa.account_name 
+         FROM receipts r 
+         LEFT JOIN Clients c ON r.client_id = c.id 
+         LEFT JOIN chart_of_accounts coa ON r.account_id = coa.id
+         WHERE r.id = ?`,
+        [id]
+      );
+      if (rows.length === 0) {
+        return res.status(404).json({ success: false, error: 'Receipt not found' });
+      }
+      res.json({ success: true, data: rows[0] });
+    } catch (error) {
+      console.error('Error fetching receipt:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch receipt' });
     }
   },
 

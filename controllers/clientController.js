@@ -157,7 +157,7 @@ const clientController = {
         client_type, outlet_account
       } = req.body;
       
-      if (!name || !email) {
+      if (!name) {
         return res.status(400).json({ message: 'Required fields missing' });
       }
       
@@ -165,8 +165,10 @@ const clientController = {
       const finalCountryId = countryId || country_id;
       
       // Build dynamic INSERT query based on available fields
-      const fields = ['name', 'email'];
-      const values = [name, email];
+      const fields = ['name'];
+      const values = [name];
+      
+      if (email) { fields.push('email'); values.push(email); }
       
       if (address) { fields.push('address'); values.push(address); }
       if (region_id) { fields.push('region_id'); values.push(region_id); }

@@ -43,11 +43,12 @@ const salesOrderController = {
       if (search) {
         whereConditions.push(`(
           so.so_number LIKE ? OR 
+          so.name LIKE ? OR
           c.name LIKE ? OR
           sr.name LIKE ?
         )`);
         const searchTerm = `%${search}%`;
-        queryParams.push(searchTerm, searchTerm, searchTerm);
+        queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
       }
       
       // Add date filters
@@ -76,9 +77,9 @@ const salesOrderController = {
       const [rows] = await db.query(`
         SELECT 
           so.*, 
-          c.name as customer_name, 
-          c.phone as customer_phone,
-          c.address as customer_address,
+          COALESCE(so.name, c.name) as customer_name, 
+          COALESCE(so.phone, c.phone) as customer_phone,
+          COALESCE(so.address, c.address) as customer_address,
           c.balance as customer_balance,
           u.full_name as created_by_name,
           sr.name as salesrep,
@@ -180,9 +181,9 @@ const salesOrderController = {
       let query = `
         SELECT 
           so.*, 
-          so.name as customer_name, 
-          so.phone as customer_phone,
-          so.address as customer_address,
+          COALESCE(c.name, so.name) as customer_name, 
+          COALESCE(c.phone, so.phone) as customer_phone,
+          COALESCE(c.address, so.address) as customer_address,
           c.balance as customer_balance,
           c.client_type,
           oc.name as client_type_name,
@@ -269,6 +270,19 @@ const salesOrderController = {
           order.items = [];
         });
       }
+      
+      // Populate customer object with phone and other fields
+      rows.forEach(order => {
+        // Create customer object for both linked customers and direct orders
+        // Always create customer object if there's any customer data
+        order.customer = {
+          id: order.customer_id || null,
+          name: order.customer_name || order.name || null,
+          phone: (order.customer_phone && order.customer_phone.trim()) || null,
+          address: order.customer_address || order.address || null,
+          balance: order.customer_balance || null
+        };
+      });
       
       console.log('Final response data length:', rows.length);
       res.json({ success: true, data: rows });
@@ -997,6 +1011,7 @@ const salesOrderController = {
       }
       
       // Support both old format (single cylinderCodeId) and new format (array of assignments)
+      // Cylinder codes are now optional
       let assignments = [];
       if (cylinderAssignments && Array.isArray(cylinderAssignments) && cylinderAssignments.length > 0) {
         assignments = cylinderAssignments.filter(a => a.cylinderCodeId && a.productId);
@@ -1005,9 +1020,7 @@ const salesOrderController = {
         assignments = [{ cylinderCodeId, productId: null }];
       }
       
-      if (assignments.length === 0) {
-        return res.status(400).json({ success: false, error: 'At least one cylinder code with product assignment is required' });
-      }
+      // Cylinder codes are optional, so we don't require them
       
       // Check if sales order exists and get its details
       const [existingSO] = await connection.query(
@@ -1186,8 +1199,8 @@ const salesOrderController = {
         }
       }
       
-      // Process each cylinder assignment
-      const firstCylinderCodeId = assignments[0].cylinderCodeId;
+      // Process each cylinder assignment (only if assignments exist)
+      const firstCylinderCodeId = assignments.length > 0 ? assignments[0].cylinderCodeId : null;
       
       for (const assignment of assignments) {
         const { cylinderCodeId, productId } = assignment;

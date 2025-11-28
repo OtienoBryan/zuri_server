@@ -305,6 +305,7 @@ router.get('/receivables/aging', receivablesController.getAgingReceivables);
 router.post('/receivables/payment', receivablesController.makeCustomerPayment);
 router.post('/receivables/confirm-payment', receivablesController.confirmCustomerPayment);
 router.get('/receipts', receivablesController.listReceipts);
+router.get('/receipts/:id', receivablesController.getReceiptById);
 router.get('/receipts/invoice/:invoice_id/pending', receivablesController.getPendingReceiptsForInvoice);
 router.get('/receipts/invoice/:invoice_id', receivablesController.getReceiptsByInvoice);
 router.get('/receipts/amounts-bulk', receivablesController.getReceiptAmountsBulk);
