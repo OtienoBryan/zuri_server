@@ -158,6 +158,7 @@ if (supplierRoutes) app.use('/api/suppliers', supplierRoutes);
 if (chatRoutes) app.use('/api/chat', chatRoutes);
 if (webhookRoutes) app.use('/api/webhooks', webhookRoutes);
 if (competitorRoutes) app.use('/api/competitors', competitorRoutes);
+if (riderRoutes) app.use('/api/riders', riderRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {

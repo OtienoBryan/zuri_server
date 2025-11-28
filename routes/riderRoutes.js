@@ -107,10 +107,33 @@ router.get('/companies', async (req, res) => {
   try {
     const [rows] = await db.query(sql);
     console.log('Companies fetched:', rows.length);
-    res.json({ data: rows });
+    console.log('Companies data:', JSON.stringify(rows, null, 2));
+    
+    // Return consistent response format
+    res.json({ 
+      success: true,
+      data: Array.isArray(rows) ? rows : []
+    });
   } catch (error) {
     console.error('Error fetching companies:', error);
-    res.status(500).json({ error: 'Failed to fetch companies', details: error.message || error });
+    console.error('Error details:', error.message, error.code, error.sqlMessage);
+    
+    // If table doesn't exist, return empty array with helpful message
+    if (error.code === 'ER_NO_SUCH_TABLE' || error.message?.includes('doesn\'t exist')) {
+      console.warn('riders_company table does not exist. Returning empty array.');
+      return res.json({ 
+        success: true,
+        data: [],
+        message: 'riders_company table does not exist. Please create the table first.'
+      });
+    }
+    
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to fetch companies', 
+      details: error.message || error,
+      data: []
+    });
   }
 });
 
