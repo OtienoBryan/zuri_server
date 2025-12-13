@@ -54,9 +54,12 @@ const journeyPlanController = {
                  jp.checkInTime,
                  jp.checkoutTime,
                  jp.imageUrl,
+                 jp.latitude,
+                 jp.longitude,
                  sr.name as user_name,
                  c.name as client_name,
-                 c.name as client_company_name
+                 c.name as client_company_name,
+                 c.name as outlet_address_name
           FROM JourneyPlan jp
           LEFT JOIN SalesRep sr ON jp.userId = sr.id
           LEFT JOIN locations c ON jp.clientId = c.id
