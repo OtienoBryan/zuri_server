@@ -77,6 +77,7 @@ const salesOrderController = {
       const [rows] = await db.query(`
         SELECT 
           so.*, 
+          COALESCE(so.amount_paid, 0) as amount_paid,
           COALESCE(so.name, c.name) as customer_name, 
           COALESCE(so.phone, c.phone) as customer_phone,
           COALESCE(so.address, c.address) as customer_address,
@@ -444,8 +445,8 @@ const salesOrderController = {
         [soResult] = await connection.query(`
           INSERT INTO sales_orders (
             so_number, customer_id, name, phone, address, email, salesrep, order_date, expected_delivery_date, 
-            notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
+            notes, status, subtotal, tax_amount, total_amount,net_price, created_by, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, NOW(), NOW())
         `, [
           soNumber, 
           clientIdToUse, 
@@ -460,6 +461,7 @@ const salesOrderController = {
           subtotal, 
           tax_amount, 
           finalTotalAmount, 
+          finalTotalAmount,
           1
         ]);
       } catch (insertError) {
@@ -469,8 +471,8 @@ const salesOrderController = {
           [soResult] = await connection.query(`
             INSERT INTO sales_orders (
               so_number, customer_id, name, phone, address, salesrep, order_date, expected_delivery_date, 
-              notes, status, subtotal, tax_amount, total_amount, created_by, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, NOW(), NOW())
+              notes, status, subtotal, tax_amount, total_amount,net_price, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, ?, ?, NOW(), NOW())
           `, [
             soNumber, 
             clientIdToUse, 
@@ -484,6 +486,7 @@ const salesOrderController = {
             subtotal, 
             tax_amount, 
             finalTotalAmount, 
+            finalTotalAmount,
             1
           ]);
         } else {
@@ -580,7 +583,8 @@ const salesOrderController = {
         const taxRate = taxType === '16%' ? 0.16 : 0; // zero_rated/exempted => 0
         const netPrice = Number(item.quantity) * Number(item.unit_price);
         const itemTaxAmount = +(netPrice * taxRate).toFixed(2);
-        const totalPrice = +(netPrice + itemTaxAmount).toFixed(2);
+        // Calculate total amount (net_price + tax)
+        const totalAmount = +(netPrice + itemTaxAmount).toFixed(2);
         
         return {
           sales_order_id: salesOrderId,
@@ -589,42 +593,104 @@ const salesOrderController = {
           unit_price: item.unit_price,
           tax_type: taxType,
           tax_amount: item.tax_amount || itemTaxAmount,
-          net_price: totalPrice,
-          total_price: totalPrice,
+          // net_price should be the same as total_amount (total price including tax)
+          net_price: totalAmount,
+          total_price: totalAmount,
           order_notes: item.order_notes || null
         };
       });
       
       // Build parameterized query for batch insert
-      const placeholders = itemsData.map(() => '(?, ?, ?, ?, ?, ?, ?, ?)').join(',');
+      // Include order_notes if provided
+      const includeOrderNotes = itemsData.some(item => item.order_notes);
+      
+      // Build values array - ensure net_price is explicitly set to total_amount
       const values = [];
-      itemsData.forEach(item => {
-        values.push(
+      const placeholders = [];
+      
+      itemsData.forEach((item, index) => {
+        // net_price should be the same as total_price (total amount including tax)
+        const netPriceValue = Number(item.total_price) || Number(item.net_price) || 0;
+        const totalPriceValue = Number(item.total_price) || 0;
+        
+        // Log first item for debugging
+        if (index === 0) {
+          console.log('Inserting item with values:', {
+            sales_order_id: item.sales_order_id,
+            product_id: item.product_id,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+            tax_type: item.tax_type,
+            tax_amount: item.tax_amount,
+            net_price: netPriceValue,
+            total_price: totalPriceValue,
+            order_notes: item.order_notes
+          });
+        }
+        
+        const rowValues = [
           item.sales_order_id,
           item.product_id,
           item.quantity,
           item.unit_price,
-          item.tax_type,
-          item.tax_amount,
-          item.net_price,
-          item.total_price
-        );
+          item.tax_type || '16%',
+          Number(item.tax_amount) || 0,
+          netPriceValue,  // net_price = total_amount (same as total_price)
+          totalPriceValue
+        ];
+        
+        if (includeOrderNotes) {
+          rowValues.push(item.order_notes || null);
+        }
+        
+        placeholders.push(`(${rowValues.map(() => '?').join(', ')})`);
+        values.push(...rowValues);
       });
       
+      const columns = includeOrderNotes
+        ? `sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price, order_notes`
+        : `sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price`;
+      
+      const insertQuery = `
+        INSERT INTO sales_order_items (
+          ${columns}
+        ) VALUES ${placeholders.join(', ')}
+      `;
+      
+      console.log('Executing INSERT query with columns:', columns);
+      console.log('Number of placeholders:', placeholders.length, 'Number of values:', values.length);
+      
       try {
-        await connection.query(`
-          INSERT INTO sales_order_items (
-            sales_order_id, product_id, quantity, unit_price, tax_type, tax_amount, net_price, total_price
-          ) VALUES ${placeholders}
-        `, values);
-      } catch (insertError) {
-        // Handle any insert errors
-        if (insertError.code === 'ER_BAD_FIELD_ERROR') {
-          // Try alternative column names if needed
-          throw insertError;
-        } else {
-          throw insertError;
+        const [result] = await connection.query(insertQuery, values);
+        console.log(`Successfully inserted ${result.affectedRows} sales order items. net_price values were set correctly.`);
+        
+        // Verify that net_price was actually saved
+        const [verifyRows] = await connection.query(`
+          SELECT id, product_id, net_price, total_price, tax_amount 
+          FROM sales_order_items 
+          WHERE sales_order_id = ? 
+          ORDER BY id DESC 
+          LIMIT 5
+        `, [salesOrderId]);
+        
+        console.log('Verification - First few inserted items:', verifyRows);
+        
+        if (verifyRows.length > 0) {
+          verifyRows.forEach((row, idx) => {
+            if (row.net_price !== row.total_price) {
+              console.warn(`WARNING: Item ${idx + 1} (ID: ${row.id}) has net_price (${row.net_price}) != total_price (${row.total_price})`);
+            }
+          });
         }
+      } catch (insertError) {
+        console.error('Error inserting sales order items:', insertError);
+        console.error('Error code:', insertError.code);
+        console.error('Error message:', insertError.message);
+        console.error('SQL State:', insertError.sqlState);
+        if (insertError.sql) {
+          console.error('Failed SQL:', insertError.sql);
+        }
+        throw insertError;
       }
       
       await connection.commit();
@@ -859,20 +925,14 @@ const salesOrderController = {
           ['53'] // Sales Revenue account code
         );
         
-        const [taxAccount] = await connection.query(
-          'SELECT id FROM chart_of_accounts WHERE id = ? AND is_active = 1',
-          ['35'] // Sales Tax Payable account code
-        );
-        
         if (arAccount.length && salesAccount.length) {
           console.log('Creating journal entry for order:', id);
           console.log('AR Account found:', arAccount[0]);
           console.log('Sales Account found:', salesAccount[0]);
-          console.log('Tax Account found:', taxAccount[0] || 'Not found');
           console.log('Current User ID:', currentUserId);
-          console.log('Total Amount:', totalAmount);
+          console.log('Subtotal Amount (no tax):', subtotal);
           
-          // Create journal entry
+          // Create journal entry (using subtotal, no tax)
           const [journalResult] = await connection.query(
             `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
              VALUES (?, ?, ?, ?, ?, ?, 'posted', ?)`,
@@ -881,19 +941,19 @@ const salesOrderController = {
               order_date || existingSO[0].order_date,
               `SO-${id}`,
               `Sales order approved - ${existingSO[0].so_number}`,
-              totalAmount,
-              totalAmount,
+              subtotal,
+              subtotal,
               currentUserId
             ]
           );
           const journalEntryId = journalResult.insertId;
           console.log('Journal entry created with ID:', journalEntryId);
           
-          // Debit Accounts Receivable
+          // Debit Accounts Receivable (using subtotal, no tax)
           await connection.query(
             `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
              VALUES (?, ?, ?, 0, ?)`,
-            [journalEntryId, arAccount[0].id, totalAmount, `Sales order ${existingSO[0].so_number}`]
+            [journalEntryId, arAccount[0].id, subtotal, `Sales order ${existingSO[0].so_number}`]
           );
           
           // Credit Sales Revenue
@@ -903,23 +963,14 @@ const salesOrderController = {
             [journalEntryId, salesAccount[0].id, subtotal, `Sales revenue for order ${existingSO[0].so_number}`]
           );
           
-          // Credit Sales Tax Payable (if tax account exists and tax amount > 0)
-          if (taxAccount.length > 0 && taxAmount > 0) {
-            await connection.query(
-              `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
-               VALUES (?, ?, 0, ?, ?)`,
-              [journalEntryId, taxAccount[0].id, taxAmount, `Sales tax for order ${existingSO[0].so_number}`]
-            );
-          }
-          
-          // Update client ledger
+          // Update client ledger (using subtotal, no tax)
           const [lastClientLedger] = await connection.query(
             'SELECT running_balance FROM client_ledger WHERE client_id = ? ORDER BY date DESC, id DESC LIMIT 1',
             [clientId]
           );
           
           const prevBalance = lastClientLedger.length > 0 ? parseFloat(lastClientLedger[0].running_balance) : 0;
-          const newBalance = prevBalance + totalAmount; // Debit increases the receivable balance
+          const newBalance = prevBalance + subtotal; // Debit increases the receivable balance
           
           await connection.query(
             `INSERT INTO client_ledger (client_id, date, description, reference_type, reference_id, debit, credit, running_balance)
@@ -930,7 +981,7 @@ const salesOrderController = {
               `Sales order - ${existingSO[0].so_number}`,
               'sales_order',
               id,
-              totalAmount,
+              subtotal,
               0,
               newBalance
             ]
@@ -942,9 +993,6 @@ const salesOrderController = {
           console.error('Required accounts not found for journal entry creation');
           console.error('AR Account (ID: 140):', arAccount);
           console.error('Sales Account (ID: 53):', salesAccount);
-          if (taxAccount.length === 0) {
-            console.warn('Tax Account (ID: 35) not found - tax entries will be skipped');
-          }
         }
       } else {
         console.log('Journal entries not created - condition not met:');
@@ -1452,11 +1500,6 @@ const salesOrderController = {
         ['53'] // Sales Revenue account ID
       );
       
-      const [taxAccount] = await connection.query(
-        'SELECT id FROM chart_of_accounts WHERE id = ? AND is_active = 1',
-        ['35'] // Sales Tax Payable account ID
-      );
-      
       const [costOfGoodsAccount] = await connection.query(
         `SELECT id FROM chart_of_accounts WHERE account_code = '500000' LIMIT 1`
       );
@@ -1468,7 +1511,7 @@ const salesOrderController = {
       if (arAccount.length && salesAccount.length) {
         console.log('Creating journal entry for invoice conversion');
         
-        // Create journal entry
+        // Create journal entry (using subtotal, no tax)
         const [journalResult] = await connection.query(
           `INSERT INTO journal_entries (entry_number, entry_date, reference, description, total_debit, total_credit, status, created_by)
            VALUES (?, ?, ?, ?, ?, ?, 'posted', ?)`,
@@ -1477,19 +1520,19 @@ const salesOrderController = {
             originalOrder.order_date,
             `INV-${id}`,
             `Invoice created from order - ${originalOrder.so_number}`,
-            totalAmount,
-            totalAmount,
+            subtotal,
+            subtotal,
             currentUserId
           ]
         );
         const journalEntryId = journalResult.insertId;
         console.log('Journal entry created with ID:', journalEntryId);
         
-        // Debit Accounts Receivable
+        // Debit Accounts Receivable (using subtotal, no tax)
         await connection.query(
           `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
            VALUES (?, ?, ?, 0, ?)`,
-          [journalEntryId, arAccount[0].id, totalAmount, `Invoice INV-${id}`]
+          [journalEntryId, arAccount[0].id, subtotal, `Invoice INV-${id}`]
         );
         
         // Credit Sales Revenue
@@ -1499,23 +1542,14 @@ const salesOrderController = {
           [journalEntryId, salesAccount[0].id, subtotal, `Sales revenue for invoice INV-${id}`]
         );
         
-        // Credit Sales Tax Payable (if tax account exists and tax amount > 0)
-        if (taxAccount.length > 0 && taxAmount > 0) {
-          await connection.query(
-            `INSERT INTO journal_entry_lines (journal_entry_id, account_id, debit_amount, credit_amount, description)
-             VALUES (?, ?, 0, ?, ?)`,
-            [journalEntryId, taxAccount[0].id, taxAmount, `Sales tax for invoice INV-${id}`]
-          );
-        }
-        
-        // Update client ledger
+        // Update client ledger (using subtotal, no tax)
         const [lastClientLedger] = await connection.query(
           'SELECT running_balance FROM client_ledger WHERE client_id = ? ORDER BY date DESC, id DESC LIMIT 1',
           [originalOrder.client_id]
         );
         
         const prevBalance = lastClientLedger.length > 0 ? parseFloat(lastClientLedger[0].running_balance) : 0;
-        const newBalance = prevBalance + totalAmount; // Debit increases the receivable balance
+        const newBalance = prevBalance + subtotal; // Debit increases the receivable balance
         
         await connection.query(
           `INSERT INTO client_ledger (client_id, date, description, reference_type, reference_id, debit, credit, running_balance)
@@ -1526,7 +1560,7 @@ const salesOrderController = {
             `Invoice - INV-${id}`,
             'sales_order',
             id,
-            totalAmount,
+            subtotal,
             0,
             newBalance
           ]
@@ -1550,9 +1584,6 @@ const salesOrderController = {
         console.error('Required accounts not found for journal entry creation');
         console.error('AR Account (ID: 140):', arAccount);
         console.error('Sales Account (ID: 53):', salesAccount);
-        if (taxAccount.length === 0) {
-          console.warn('Tax Account (ID: 35) not found - tax entries will be skipped');
-        }
       }
       
       // Calculate total cost of goods sold and create COGS journal entry

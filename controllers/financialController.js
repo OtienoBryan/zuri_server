@@ -539,63 +539,92 @@ const productsController = {
 
 // Dashboard Controller
 const dashboardController = {
-  // Get dashboard statistics
+  // Get dashboard statistics (optimized with parallel queries and additional counts)
   getDashboardStats: async (req, res) => {
     try {
-      // Get total sales (from sales orders)
-      const [salesResult] = await db.query(`
-        SELECT COALESCE(SUM(total_amount), 0) as totalSales 
-        FROM sales_orders 
-        WHERE status IN ('delivered', 'confirmed', 'shipped')
-      `);
-      
-      // Get total purchases (from purchase orders)
-      const [purchasesResult] = await db.query(`
-        SELECT COALESCE(SUM(total_amount), 0) as totalPurchases 
-        FROM purchase_orders 
-        WHERE status IN ('received', 'sent')
-        AND DATE(order_date) = CURDATE()
-      `);
-      
-      // Get total receivables (outstanding client payments)
-      const [receivablesResult] = await db.query(`
-        SELECT COALESCE(SUM(debit - credit), 0) as totalReceivables
-        FROM client_ledger
-      `);
-      
-      // Get total payables (outstanding supplier payments)
-      const [payablesResult] = await db.query(`
-        SELECT COALESCE(SUM(credit - debit), 0) as totalPayables
-        FROM supplier_ledger
-      `);
-      
-      // Get low stock items count
-      const [lowStockResult] = await db.query(`
-        SELECT COUNT(*) as lowStockItems
-        FROM products 
-        WHERE current_stock <= reorder_level AND is_active = true
-      `);
-      
-      // Get pending orders count
-      const [pendingOrdersResult] = await db.query(`
-        SELECT COUNT(*) as pendingOrders
-        FROM sales_orders 
-        WHERE status IN ('draft', 'confirmed', 'shipped')
-      `);
-      
-      // Get total assets (sum of purchase_value from assets)
-      const [assetsResult] = await db.query(`
-        SELECT COALESCE(SUM(purchase_value), 0) as totalAssets FROM assets
-      `);
+      // Execute all queries in parallel for better performance
+      const [
+        salesResult,
+        purchasesResult,
+        receivablesResult,
+        payablesResult,
+        lowStockResult,
+        pendingOrdersResult,
+        assetsResult,
+        newOrdersResult,
+        newCreditNotesResult
+      ] = await Promise.all([
+        // Get total sales (from sales orders)
+        db.query(`
+          SELECT COALESCE(SUM(total_amount), 0) as totalSales 
+          FROM sales_orders 
+          WHERE status IN ('delivered', 'confirmed', 'shipped')
+        `),
+        
+        // Get total purchases (from purchase orders)
+        db.query(`
+          SELECT COALESCE(SUM(total_amount), 0) as totalPurchases 
+          FROM purchase_orders 
+          WHERE status IN ('received', 'sent')
+          AND DATE(order_date) = CURDATE()
+        `),
+        
+        // Get total receivables (outstanding client payments)
+        db.query(`
+          SELECT COALESCE(SUM(debit - credit), 0) as totalReceivables
+          FROM client_ledger
+        `),
+        
+        // Get total payables (outstanding supplier payments)
+        db.query(`
+          SELECT COALESCE(SUM(credit - debit), 0) as totalPayables
+          FROM supplier_ledger
+        `),
+        
+        // Get low stock items count
+        db.query(`
+          SELECT COUNT(*) as lowStockItems
+          FROM products 
+          WHERE current_stock <= reorder_level AND is_active = true
+        `),
+        
+        // Get pending orders count
+        db.query(`
+          SELECT COUNT(*) as pendingOrders
+          FROM sales_orders 
+          WHERE status IN ('draft', 'confirmed', 'shipped')
+        `),
+        
+        // Get total assets (sum of purchase_value from assets)
+        db.query(`
+          SELECT COALESCE(SUM(purchase_value), 0) as totalAssets FROM assets
+        `),
+        
+        // Get count of new orders (my_status = 0)
+        db.query(`
+          SELECT COUNT(*) as newOrdersCount
+          FROM sales_orders 
+          WHERE my_status = 0 OR my_status = '0'
+        `),
+        
+        // Get count of new credit notes (my_status = 0)
+        db.query(`
+          SELECT COUNT(*) as newCreditNotesCount
+          FROM credit_notes 
+          WHERE my_status = 0 OR my_status = '0'
+        `)
+      ]);
       
       const stats = {
-        totalSales: salesResult[0].totalSales,
-        totalPurchases: purchasesResult[0].totalPurchases,
-        totalReceivables: receivablesResult[0].totalReceivables,
-        totalPayables: payablesResult[0].totalPayables,
-        lowStockItems: lowStockResult[0].lowStockItems,
-        pendingOrders: pendingOrdersResult[0].pendingOrders,
-        totalAssets: assetsResult[0].totalAssets
+        totalSales: salesResult[0][0].totalSales,
+        totalPurchases: purchasesResult[0][0].totalPurchases,
+        totalReceivables: receivablesResult[0][0].totalReceivables,
+        totalPayables: payablesResult[0][0].totalPayables,
+        lowStockItems: lowStockResult[0][0].lowStockItems,
+        pendingOrders: pendingOrdersResult[0][0].pendingOrders,
+        totalAssets: assetsResult[0][0].totalAssets,
+        newOrdersCount: newOrdersResult[0][0].newOrdersCount,
+        newCreditNotesCount: newCreditNotesResult[0][0].newCreditNotesCount
       };
       
       res.json({ success: true, data: stats });

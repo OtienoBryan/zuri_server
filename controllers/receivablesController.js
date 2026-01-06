@@ -1,21 +1,43 @@
 const db = require('../database/db');
 
 const receivablesController = {
-  // Get aging receivables for all customers
+  // Get aging receivables for all customers from sales_orders table
   getAgingReceivables: async (req, res) => {
     try {
       const [rows] = await db.query(`
         SELECT
           c.id AS customer_id,
           c.name AS client_name,
-          SUM(CASE WHEN DATEDIFF(NOW(), l.date) <= 0 THEN l.debit - l.credit ELSE 0 END) AS current,
-          SUM(CASE WHEN DATEDIFF(NOW(), l.date) BETWEEN 1 AND 30 THEN l.debit - l.credit ELSE 0 END) AS days_1_30,
-          SUM(CASE WHEN DATEDIFF(NOW(), l.date) BETWEEN 31 AND 60 THEN l.debit - l.credit ELSE 0 END) AS days_31_60,
-          SUM(CASE WHEN DATEDIFF(NOW(), l.date) BETWEEN 61 AND 90 THEN l.debit - l.credit ELSE 0 END) AS days_61_90,
-          SUM(CASE WHEN DATEDIFF(NOW(), l.date) > 90 THEN l.debit - l.credit ELSE 0 END) AS days_90_plus,
-          SUM(l.debit - l.credit) AS total_receivable
-                 FROM Clients c
-         LEFT JOIN client_ledger l ON c.id = l.client_id
+          SUM(CASE 
+            WHEN DATEDIFF(NOW(), so.order_date) <= 0 
+            THEN COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0) 
+            ELSE 0 
+          END) AS current,
+          SUM(CASE 
+            WHEN DATEDIFF(NOW(), so.order_date) BETWEEN 1 AND 30 
+            THEN COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0) 
+            ELSE 0 
+          END) AS days_1_30,
+          SUM(CASE 
+            WHEN DATEDIFF(NOW(), so.order_date) BETWEEN 31 AND 60 
+            THEN COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0) 
+            ELSE 0 
+          END) AS days_31_60,
+          SUM(CASE 
+            WHEN DATEDIFF(NOW(), so.order_date) BETWEEN 61 AND 90 
+            THEN COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0) 
+            ELSE 0 
+          END) AS days_61_90,
+          SUM(CASE 
+            WHEN DATEDIFF(NOW(), so.order_date) > 90 
+            THEN COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0) 
+            ELSE 0 
+          END) AS days_90_plus,
+          SUM(COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0)) AS total_receivable
+        FROM Clients c
+        INNER JOIN sales_orders so ON c.id = so.customer_id
+        WHERE so.my_status IN (1, 2, 3)
+          AND (COALESCE(so.total_amount, 0) - COALESCE(so.amount_paid, 0)) > 0
         GROUP BY c.id, c.name
         HAVING total_receivable > 0
         ORDER BY c.name
@@ -266,13 +288,58 @@ const receivablesController = {
       );
       console.log('Credit line created for AR account:', arAccount[0].id, 'amount:', receipt.amount);
 
-      // If this receipt is linked to an invoice, update the invoice status to 'paid'
+      // If this receipt is linked to an invoice, update the invoice status to 'paid' and amount_paid
+      if (receipt.invoice_number) {
+        try {
+          // Cast invoice_number to INT for comparison
+          const invoiceId = parseInt(receipt.invoice_number);
+          if (!isNaN(invoiceId)) {
+            // Check if amount_paid column exists, if not, add it
+            const [columns] = await connection.query(
+              `SELECT COLUMN_NAME 
+               FROM INFORMATION_SCHEMA.COLUMNS 
+               WHERE TABLE_SCHEMA = DATABASE() 
+               AND TABLE_NAME = 'sales_orders' 
+               AND COLUMN_NAME = 'amount_paid'`
+            );
+
+            if (columns.length === 0) {
+              // Add amount_paid column if it doesn't exist
+              await connection.query(
+                `ALTER TABLE sales_orders 
+                 ADD COLUMN amount_paid DECIMAL(15,2) DEFAULT 0.00 
+                 AFTER total_amount`
+              );
+            }
+
+            // Update amount_paid by adding the receipt amount
+            // Use COALESCE to handle NULL values
+            await connection.query(
+              `UPDATE sales_orders 
+               SET amount_paid = COALESCE(amount_paid, 0) + ?,
+                   status = CASE 
+                     WHEN COALESCE(amount_paid, 0) + ? >= total_amount THEN 'paid'
+                     ELSE status
+                   END
+               WHERE id = ?`,
+              [receipt.amount, receipt.amount, invoiceId]
+            );
+
+            console.log(`Updated amount_paid for sales_order ${invoiceId} by ${receipt.amount}`);
+          }
+        } catch (updateError) {
+          // Log error but don't fail the transaction
+          console.error('Error updating amount_paid in sales_orders:', updateError);
+        }
+      }
+
+      // Also check for invoice via client_ledger (legacy method)
       const [invoiceResult] = await connection.query(
         'SELECT id FROM sales_orders WHERE id IN (SELECT reference_id FROM client_ledger WHERE reference_type = ? AND reference_id = ?)',
         ['receipt', receipt_id]
       );
       
-      if (invoiceResult.length > 0) {
+      if (invoiceResult.length > 0 && !receipt.invoice_number) {
         await connection.query(
           `UPDATE sales_orders SET status = 'paid' WHERE id = ?`,
           [invoiceResult[0].id]
@@ -388,6 +455,47 @@ const receivablesController = {
         'UPDATE Clients SET balance = balance - ? WHERE id = ?',
         [receipt.amount, receipt.client_id]
       );
+
+      // Update amount_paid in sales_orders table if this receipt is linked to an invoice
+      if (receipt.invoice_number) {
+        try {
+          // Cast invoice_number to INT for comparison
+          const invoiceId = parseInt(receipt.invoice_number);
+          if (!isNaN(invoiceId)) {
+            // Check if amount_paid column exists, if not, add it
+            const [columns] = await connection.query(
+              `SELECT COLUMN_NAME 
+               FROM INFORMATION_SCHEMA.COLUMNS 
+               WHERE TABLE_SCHEMA = DATABASE() 
+               AND TABLE_NAME = 'sales_orders' 
+               AND COLUMN_NAME = 'amount_paid'`
+            );
+
+            if (columns.length === 0) {
+              // Add amount_paid column if it doesn't exist
+              await connection.query(
+                `ALTER TABLE sales_orders 
+                 ADD COLUMN amount_paid DECIMAL(15,2) DEFAULT 0.00 
+                 AFTER total_amount`
+              );
+            }
+
+            // Update amount_paid by adding the receipt amount
+            // Use COALESCE to handle NULL values
+            await connection.query(
+              `UPDATE sales_orders 
+               SET amount_paid = COALESCE(amount_paid, 0) + ? 
+               WHERE id = ?`,
+              [receipt.amount, invoiceId]
+            );
+
+            console.log(`Updated amount_paid for sales_order ${invoiceId} by ${receipt.amount}`);
+          }
+        } catch (updateError) {
+          // Log error but don't fail the transaction
+          console.error('Error updating amount_paid in sales_orders:', updateError);
+        }
+      }
 
       // Create journal entry for the payment
       if (receipt.account_id) {
@@ -529,18 +637,19 @@ const receivablesController = {
       console.log('Looking for receipts with invoice_number:', invoice_id);
       
       // Get all receipts for this invoice number directly from the receipts table
+      // Cast invoice_number to INT for proper comparison
       const [receipts] = await db.query(
         `SELECT r.*, c.name as client_name 
          FROM receipts r 
          LEFT JOIN Clients c ON r.client_id = c.id
-         WHERE r.invoice_number = ?
+         WHERE CAST(r.invoice_number AS UNSIGNED) = ?
          ORDER BY r.receipt_date DESC`,
         [invoice_id]
       );
       
       console.log('Found receipts:', receipts);
       
-      // Calculate total amount paid
+      // Calculate total amount paid - only count confirmed receipts
       const totalAmountPaid = receipts.reduce((sum, receipt) => {
         // Only count confirmed receipts towards amount paid
         if (receipt.status === 'confirmed') {
@@ -586,13 +695,14 @@ const receivablesController = {
       const placeholders = invoiceIdArray.map(() => '?').join(',');
       
       // Fetch all receipts for these invoices in a single query
+      // Cast invoice_number to INT for proper comparison, and only include confirmed receipts
       const [receipts] = await db.query(
         `SELECT 
-          r.invoice_number,
+          CAST(r.invoice_number AS UNSIGNED) as invoice_number,
           r.amount,
           r.status
          FROM receipts r 
-         WHERE r.invoice_number IN (${placeholders})
+         WHERE CAST(r.invoice_number AS UNSIGNED) IN (${placeholders})
          AND r.status = 'confirmed'`,
         invoiceIdArray
       );
