@@ -2,10 +2,17 @@ const db = require('../database/db');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
-const { Resend } = require('resend');
 
-// Initialize Resend with API key
-const resend = new Resend(process.env.RESEND_API_KEY || 're_K1pxjovs_GPFiS82AsLzrxSkRtUcjU3Vj');
+// Try to load Resend, but don't fail if it's not available
+let resend;
+try {
+  const { Resend } = require('resend');
+  // Initialize Resend with API key
+  resend = new Resend(process.env.RESEND_API_KEY || 're_K1pxjovs_GPFiS82AsLzrxSkRtUcjU3Vj');
+} catch (error) {
+  console.warn('Resend package not available:', error.message);
+  resend = null;
+}
 
 // In-memory store for password reset codes (in production, use Redis or database)
 const passwordResetCodes = new Map();
@@ -114,6 +121,14 @@ const forgotPassword = async (req, res) => {
     console.log(`Password reset code generated for user: ${user.name} (${user.business_email})`);
     
     // Send email with reset code using Resend
+    if (!resend) {
+      console.error('Resend is not available. Cannot send email.');
+      return res.status(500).json({ 
+        success: false, 
+        message: 'Email service is not configured. Please contact support.' 
+      });
+    }
+
     try {
       const emailResult = await resend.emails.send({
         from: 'noreply@zurigas.com',
