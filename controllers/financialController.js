@@ -10,18 +10,47 @@ const chartOfAccountsController = {
   // Get all accounts
   getAllAccounts: async (req, res) => {
     try {
-      let query = `SELECT * FROM chart_of_accounts WHERE is_active = 1`;
+      let query = `
+        SELECT 
+          coa.id,
+          coa.account_code,
+          coa.account_name,
+          coa.account_type,
+          coa.parent_account_id,
+          coa.description,
+          coa.is_active,
+          coa.created_at,
+          coa.updated_at,
+          at.account_type as account_type_name
+        FROM chart_of_accounts coa
+        LEFT JOIN account_types at ON coa.account_type = at.id
+        WHERE coa.is_active = 1
+      `;
       const params = [];
       if (req.query.parent_account_id) {
-        query += ' AND parent_account_id = ?';
+        query += ' AND coa.parent_account_id = ?';
         params.push(req.query.parent_account_id);
       }
-      query += ' ORDER BY account_code';
+      query += ' ORDER BY coa.account_code';
       const [rows] = await db.query(query, params);
       res.json({ success: true, data: rows });
     } catch (error) {
       console.error('Error fetching accounts:', error);
-      res.status(500).json({ success: false, error: 'Failed to fetch accounts' });
+      // If account_types table doesn't exist, fallback to simple query
+      try {
+        let fallbackQuery = `SELECT * FROM chart_of_accounts WHERE is_active = 1`;
+        const fallbackParams = [];
+        if (req.query.parent_account_id) {
+          fallbackQuery += ' AND parent_account_id = ?';
+          fallbackParams.push(req.query.parent_account_id);
+        }
+        fallbackQuery += ' ORDER BY account_code';
+        const [rows] = await db.query(fallbackQuery, fallbackParams);
+        res.json({ success: true, data: rows });
+      } catch (fallbackError) {
+        console.error('Error in fallback query:', fallbackError);
+        res.status(500).json({ success: false, error: 'Failed to fetch accounts' });
+      }
     }
   },
 
@@ -77,7 +106,14 @@ const chartOfAccountsController = {
   getAccountById: async (req, res) => {
     try {
       const { id } = req.params;
-      const [rows] = await db.query('SELECT * FROM chart_of_accounts WHERE id = ?', [id]);
+      const [rows] = await db.query(`
+        SELECT 
+          coa.*,
+          at.account_type as account_type_name
+        FROM chart_of_accounts coa
+        LEFT JOIN account_types at ON coa.account_type = at.id
+        WHERE coa.id = ?
+      `, [id]);
       
       if (rows.length === 0) {
         return res.status(404).json({ success: false, error: 'Account not found' });
@@ -86,7 +122,27 @@ const chartOfAccountsController = {
       res.json({ success: true, data: rows[0] });
     } catch (error) {
       console.error('Error fetching account:', error);
-      res.status(500).json({ success: false, error: 'Failed to fetch account' });
+      // Fallback to simple query if account_types table doesn't exist
+      try {
+        const [rows] = await db.query('SELECT * FROM chart_of_accounts WHERE id = ?', [id]);
+        if (rows.length === 0) {
+          return res.status(404).json({ success: false, error: 'Account not found' });
+        }
+        res.json({ success: true, data: rows[0] });
+      } catch (fallbackError) {
+        res.status(500).json({ success: false, error: 'Failed to fetch account' });
+      }
+    }
+  },
+
+  // Get all account types
+  getAllAccountTypes: async (req, res) => {
+    try {
+      const [rows] = await db.query('SELECT * FROM account_types ORDER BY id');
+      res.json({ success: true, data: rows });
+    } catch (error) {
+      console.error('Error fetching account types:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch account types' });
     }
   },
 

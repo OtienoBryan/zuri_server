@@ -47,6 +47,7 @@ try {
   feedbackReportRoutes = require('./routes/feedbackReportRoutes');
   availabilityReportRoutes = require('./routes/availabilityReportRoutes');
   leaveRequestRoutes = require('./routes/leaveRequestRoutes');
+  authRoutes = require('./routes/authRoutes');
   supplierRoutes = require('./routes/supplierRoutes');
   receiptRoutes = require('./routes/receiptRoutes');
   myAssetsRoutes = require('./routes/myAssetsRoutes');
@@ -160,74 +161,10 @@ const mapRequestFields = (request) => {
 };
 
 // Auth routes
-app.post('/api/auth/login', async (req, res) => {
-  try {
-    console.log('Login attempt received:', req.body);
-    const { username, password } = req.body;
-
-    if (!username || !password) {
-      console.log('Missing username or password');
-      return res.status(400).json({ message: 'Username and password are required' });
-    }
-
-    // Get staff from database by name
-    console.log('Querying database for staff by name:', username);
-    const [staff] = await db.query(
-      'SELECT * FROM staff WHERE name = ?',
-      [username]
-    );
-
-    console.log('Database query result:', staff);
-
-    if (staff.length === 0) {
-      console.log('No staff found with name:', username);
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    const user = staff[0];
-
-    if (!user.password) {
-      console.log('No password set for this staff member:', username);
-      return res.status(401).json({ message: 'No password set for this staff member' });
-    }
-
-    // Compare password
-    console.log('Comparing passwords...');
-    const isValidPassword = await bcrypt.compare(password, user.password);
-    console.log('Password comparison result:', isValidPassword);
-
-    if (!isValidPassword) {
-      console.log('Invalid password for staff:', username);
-      return res.status(401).json({ message: 'Invalid credentials' });
-    }
-
-    // Create JWT token
-    console.log('Creating JWT token for staff:', username);
-    const token = jwt.sign(
-      { 
-        userId: user.id,
-        name: user.name,
-        role: user.role 
-      },
-      process.env.JWT_SECRET || 'your-secret-key',
-      { expiresIn: '24h' }
-    );
-
-    console.log('Login successful for staff:', username);
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        name: user.name,
-        email: user.business_email,
-        role: user.role
-      }
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ message: 'Internal server error' });
-  }
-});
+const authController = require('./controllers/authController');
+app.post('/api/auth/login', authController.login);
+app.post('/api/auth/forgot-password', authController.forgotPassword);
+app.post('/api/auth/reset-password', authController.resetPassword);
 
 // Service Types routes
 app.get('/api/service-types', async (req, res) => {

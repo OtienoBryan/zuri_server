@@ -86,6 +86,7 @@ router.get('/accounts/type/:account_type', chartOfAccountsController.getAccounts
 router.get('/expense-types', chartOfAccountsController.getExpenseTypes);
 router.get('/accounts/type16', chartOfAccountsController.getAccountsByType16);
 router.get('/accounts/:id', chartOfAccountsController.getAccountById);
+router.get('/account-types', chartOfAccountsController.getAllAccountTypes);
 router.post('/accounts', chartOfAccountsController.createAccount);
 router.put('/accounts/:id', chartOfAccountsController.updateAccount);
 router.delete('/accounts/:id', chartOfAccountsController.deleteAccount);
