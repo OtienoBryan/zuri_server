@@ -161,9 +161,10 @@ const mapRequestFields = (request) => {
 };
 
 // Auth routes
-if (authRoutes) {
-  app.use('/api/auth', authRoutes);
-}
+const authController = require('./controllers/authController');
+app.post('/api/auth/login', authController.login);
+app.post('/api/auth/forgot-password', authController.forgotPassword);
+app.post('/api/auth/reset-password', authController.resetPassword);
 
 // Service Types routes
 app.get('/api/service-types', async (req, res) => {
