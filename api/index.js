@@ -90,7 +90,7 @@ app.post('/api/auth/test', (req, res) => {
   res.json({ message: 'Auth test endpoint working!', timestamp: new Date().toISOString() });
 });
 
-// Inline login route for testing
+// Inline login route (fallback if authRoutes fails to load)
 app.post('/api/auth/login', async (req, res) => {
   try {
     console.log('Login attempt received:', req.body);
@@ -101,15 +101,59 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(400).json({ message: 'Username and password are required' });
     }
 
-    // For testing, accept any credentials
-    console.log('Login successful for:', username);
+    if (!db) {
+      console.error('Database not available');
+      return res.status(500).json({ message: 'Database connection not available' });
+    }
+
+    // Get staff from database by name
+    console.log('Querying database for staff by name:', username);
+    const [staff] = await db.query('SELECT * FROM staff WHERE name = ?', [username]);
+
+    console.log('Database query result:', staff);
+
+    if (staff.length === 0) {
+      console.log('No staff found with name:', username);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    const user = staff[0];
+
+    if (!user.password) {
+      console.log('No password set for this staff member:', username);
+      return res.status(401).json({ message: 'No password set for this staff member' });
+    }
+
+    // Compare password
+    console.log('Comparing passwords...');
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    console.log('Password comparison result:', isValidPassword);
+
+    if (!isValidPassword) {
+      console.log('Invalid password for staff:', username);
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // Create JWT token
+    console.log('Creating JWT token for staff:', username);
+    const token = jwt.sign(
+      { 
+        userId: user.id,
+        name: user.name,
+        role: user.role 
+      },
+      process.env.JWT_SECRET || 'your-secret-key',
+      { expiresIn: '24h' }
+    );
+
+    console.log('Login successful for staff:', username);
     res.json({
-      token: 'test-token-123',
+      token,
       user: {
-        id: 1,
-        name: username,
-        email: 'test@example.com',
-        role: 'admin'
+        id: user.id,
+        name: user.name,
+        email: user.business_email,
+        role: user.role
       }
     });
   } catch (error) {
@@ -139,10 +183,12 @@ console.log('webhookRoutes:', !!webhookRoutes);
 console.log('competitorRoutes:', !!competitorRoutes);
 
 // Import and use all routes
-if (authRoutes) {
-  console.log('Using authRoutes');
-  app.use('/api/auth', authRoutes);
-}
+// Note: Don't register authRoutes to avoid conflicts with inline login route
+// The inline login route above serves as the main auth endpoint
+// if (authRoutes) {
+//   console.log('Using authRoutes');
+//   app.use('/api/auth', authRoutes);
+// }
 if (financialRoutes) app.use('/api/financial', financialRoutes);
 if (staffRoutes) app.use('/api/staff', staffRoutes);
 if (routesRoutes) app.use('/api/routes', routesRoutes);
