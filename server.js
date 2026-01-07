@@ -12,12 +12,13 @@ process.env.TZ = 'UTC';
 process.env.NODE_TZ = 'UTC';
 
 // Try to require database and other modules, but don't crash if they fail
-let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, routesRoutes, locationsRoutes, webhookRoutes, outletStockPlanRoutes, competitorRoutes;
+let db, staffController, roleController, multer, upload, uploadController, teamController, clientController, branchController, serviceChargeController, journeyPlanController, payrollRoutes, financialRoutes, staffRoutes, chatRoutes, clientRoutes, salesRoutes, managerRoutes, noticeRoutes, salesRepLeaveRoutes, calendarTaskRoutes, userRoutes, loginHistoryRoutes, journeyPlanRoutes, riderRoutes, myVisibilityReportRoutes, feedbackReportRoutes, availabilityReportRoutes, leaveRequestRoutes, supplierRoutes, receiptRoutes, myAssetsRoutes, faultyProductsRoutes, storeRoutes, authController, routesRoutes, locationsRoutes, webhookRoutes, outletStockPlanRoutes, competitorRoutes;
 
 try {
   db = require('./database/db');
   staffController = require('./controllers/staffController');
   roleController = require('./controllers/roleController');
+  authController = require('./controllers/authController');
   multer = require('multer');
   upload = multer({ dest: 'uploads/' });
   uploadController = require('./controllers/uploadController');
@@ -161,10 +162,47 @@ const mapRequestFields = (request) => {
 };
 
 // Auth routes
-const authController = require('./controllers/authController');
-app.post('/api/auth/login', authController.login);
-app.post('/api/auth/forgot-password', authController.forgotPassword);
-app.post('/api/auth/reset-password', authController.resetPassword);
+if (authController) {
+  app.post('/api/auth/login', authController.login);
+  app.post('/api/auth/forgot-password', authController.forgotPassword);
+  app.post('/api/auth/reset-password', authController.resetPassword);
+} else {
+  // Fallback if authController fails to load
+  app.post('/api/auth/login', async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ message: 'Username and password are required' });
+      }
+      const [staff] = await db.query('SELECT * FROM staff WHERE name = ?', [username]);
+      if (staff.length === 0) {
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+      const user = staff[0];
+      if (!user.password) {
+        return res.status(401).json({ message: 'No password set for this staff member' });
+      }
+      const bcrypt = require('bcryptjs');
+      const isValidPassword = await bcrypt.compare(password, user.password);
+      if (!isValidPassword) {
+        return res.status(401).json({ message: 'Invalid credentials' });
+      }
+      const jwt = require('jsonwebtoken');
+      const token = jwt.sign(
+        { userId: user.id, name: user.name, role: user.role },
+        process.env.JWT_SECRET || 'your-secret-key',
+        { expiresIn: '24h' }
+      );
+      res.json({
+        token,
+        user: { id: user.id, name: user.name, email: user.business_email, role: user.role }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ message: 'Internal server error' });
+    }
+  });
+}
 
 // Service Types routes
 app.get('/api/service-types', async (req, res) => {
