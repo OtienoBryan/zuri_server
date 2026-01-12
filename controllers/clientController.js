@@ -382,15 +382,33 @@ const clientController = {
     try {
       const { id } = req.params;
       console.log(`[getClientInvoices] called for client_id: ${id}`);
-      const [rows] = await db.query(
-        'SELECT * FROM sales_orders WHERE client_id = ? ORDER BY order_date DESC, id DESC',
-        [id]
-      );
-      console.log(`[getClientInvoices] returning ${rows.length} invoices for client_id: ${id}`);
-      res.json({ success: true, data: rows });
+      
+      // Query using customer_id (which is the field in sales_orders table that references Clients.id)
+      // Also check for amount_paid from receipts to calculate outstanding balance
+      const [rows] = await db.query(`
+        SELECT 
+          so.*,
+          COALESCE(SUM(CASE WHEN r.status = 'confirmed' THEN r.amount ELSE 0 END), 0) as amount_paid
+        FROM sales_orders so
+        LEFT JOIN receipts r ON so.id = r.invoice_number
+        WHERE so.customer_id = ?
+        GROUP BY so.id
+        ORDER BY so.order_date DESC, so.id DESC
+      `, [id]);
+      
+      // Format the response with calculated fields
+      const invoices = rows.map((row) => ({
+        ...row,
+        amount_paid: parseFloat(row.amount_paid) || 0,
+        total_amount: parseFloat(row.total_amount) || parseFloat(row.net_price) || 0,
+        balance: (parseFloat(row.total_amount) || parseFloat(row.net_price) || 0) - (parseFloat(row.amount_paid) || 0)
+      }));
+      
+      console.log(`[getClientInvoices] returning ${invoices.length} invoices for client_id: ${id}`);
+      res.json({ success: true, data: invoices });
     } catch (error) {
       console.error('[getClientInvoices] error:', error);
-      res.status(500).json({ message: 'Failed to fetch client invoices', error: error.message });
+      res.status(500).json({ success: false, error: 'Failed to fetch client invoices', message: error.message });
     }
   },
 };

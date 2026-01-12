@@ -195,6 +195,7 @@ const salesOrderController = {
           u.full_name as created_by_name,
           sr.name as salesrep,
           COALESCE(sr_region.name, sr.region) as salesrep_region_name,
+          rt.name as salesrep_type_name,
           r.name as rider_name,
           r.contact as rider_contact,
           receiver.name as received_by_name,
@@ -205,6 +206,7 @@ const salesOrderController = {
         LEFT JOIN outlet_accounts oa ON c.outlet_account = oa.id
         LEFT JOIN users u ON so.created_by = u.id
         LEFT JOIN SalesRep sr ON so.salesrep = sr.id
+        LEFT JOIN rep_type rt ON sr.rep_type_id = rt.id
         LEFT JOIN Regions sr_region ON sr.region = sr_region.id OR sr.region = sr_region.name
         LEFT JOIN Riders r ON so.rider_id = r.id
         LEFT JOIN staff receiver ON so.received_by = receiver.id
