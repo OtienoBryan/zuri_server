@@ -1542,43 +1542,68 @@ const salesOrderController = {
           [journalEntryId, salesAccount[0].id, subtotal, `Sales revenue for invoice INV-${id}`]
         );
         
-        // Update client ledger (using subtotal, no tax)
-        const [lastClientLedger] = await connection.query(
-          'SELECT running_balance FROM client_ledger WHERE client_id = ? ORDER BY date DESC, id DESC LIMIT 1',
-          [originalOrder.client_id]
-        );
+        // Update client ledger (using totalAmount including tax - client owes the full amount)
+        // Use customer_id from sales_orders table (which maps to Clients.id)
+        const clientId = originalOrder.customer_id || originalOrder.client_id;
         
-        const prevBalance = lastClientLedger.length > 0 ? parseFloat(lastClientLedger[0].running_balance) : 0;
-        const newBalance = prevBalance + subtotal; // Debit increases the receivable balance
-        
-        await connection.query(
-          `INSERT INTO client_ledger (client_id, date, description, reference_type, reference_id, debit, credit, running_balance)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            originalOrder.client_id,
-            originalOrder.order_date,
-            `Invoice - INV-${id}`,
-            'sales_order',
-            id,
-            subtotal,
-            0,
-            newBalance
-          ]
-        );
-        
-        console.log('Journal entries and client ledger updated successfully for invoice');
-        console.log('Client balance updated from', prevBalance, 'to', newBalance);
-        
-        // Update the Clients table balance column
-        try {
-          await connection.query(
-            'UPDATE Clients SET balance = ? WHERE id = ?',
-            [newBalance, originalOrder.client_id]
+        if (!clientId || clientId === 0) {
+          console.warn('No client_id found for order, skipping client ledger update');
+        } else {
+          const [lastClientLedger] = await connection.query(
+            'SELECT running_balance FROM client_ledger WHERE client_id = ? ORDER BY date DESC, id DESC LIMIT 1',
+            [clientId]
           );
-          console.log('Clients table balance updated successfully');
-        } catch (balanceError) {
-          console.warn('Failed to update Clients table balance:', balanceError.message);
-          // Continue with the transaction even if balance update fails
+          
+          const prevBalance = lastClientLedger.length > 0 ? parseFloat(lastClientLedger[0].running_balance) : 0;
+          const newBalance = prevBalance + totalAmount; // Debit increases the receivable balance (use totalAmount, not subtotal)
+          
+          const [ledgerResult] = await connection.query(
+            `INSERT INTO client_ledger (client_id, date, description, reference_type, reference_id, debit, credit, running_balance)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              clientId,
+              originalOrder.order_date,
+              `Invoice - INV-${id}`,
+              'sales_order',
+              id,
+              totalAmount,
+              0,
+              newBalance
+            ]
+          );
+          
+          // Recalculate running balances for all subsequent client ledger entries
+          const [subsequentClientEntries] = await connection.query(
+            'SELECT * FROM client_ledger WHERE client_id = ? AND id > ? ORDER BY id ASC',
+            [clientId, ledgerResult.insertId]
+          );
+          
+          let currentClientBalance = newBalance;
+          for (const subsequentEntry of subsequentClientEntries) {
+            const debit = parseFloat(subsequentEntry.debit || 0);
+            const credit = parseFloat(subsequentEntry.credit || 0);
+            currentClientBalance = currentClientBalance + debit - credit;
+            
+            await connection.query(
+              'UPDATE client_ledger SET running_balance = ? WHERE id = ?',
+              [currentClientBalance, subsequentEntry.id]
+            );
+          }
+          
+          console.log('Journal entries and client ledger updated successfully for invoice');
+          console.log('Client balance updated from', prevBalance, 'to', currentClientBalance);
+          
+          // Update the Clients table balance column with the final calculated balance
+          try {
+            await connection.query(
+              'UPDATE Clients SET balance = ? WHERE id = ?',
+              [currentClientBalance, clientId]
+            );
+            console.log('Clients table balance updated successfully');
+          } catch (balanceError) {
+            console.warn('Failed to update Clients table balance:', balanceError.message);
+            // Continue with the transaction even if balance update fails
+          }
         }
       } else {
         console.error('Required accounts not found for journal entry creation');

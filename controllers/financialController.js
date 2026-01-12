@@ -1638,6 +1638,9 @@ const getCashAccountLedger = async (req, res) => {
 
 // Create an expense payment
 const createExpensePayment = async (req, res) => {
+  // Start transaction
+  await db.query('START TRANSACTION');
+  
   try {
     const {
       expense_detail_id,
@@ -1653,6 +1656,7 @@ const createExpensePayment = async (req, res) => {
     } = req.body;
 
     if (!expense_detail_id || !journal_entry_id || !supplier_id || !payment_date || !payment_method || !account_id || amount === undefined) {
+      await db.query('ROLLBACK');
       return res.status(400).json({ success: false, error: 'Missing required fields' });
     }
 
@@ -1660,11 +1664,12 @@ const createExpensePayment = async (req, res) => {
     // Use a default staff ID (1) or get from req.user if it exists and is valid
     const createdBy = 1;
 
+    // Insert payment with status 'confirmed' to immediately reflect in expense summary
     const [result] = await db.query(`
       INSERT INTO expense_payments (
         payment_number, expense_detail_id, journal_entry_id, supplier_id, payment_date, currency,
         payment_method, account_id, amount, reference, notes, status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'confirmed', ?)
     `, [
       paymentNumber,
       expense_detail_id,
@@ -1680,8 +1685,87 @@ const createExpensePayment = async (req, res) => {
       createdBy
     ]);
 
-    res.status(201).json({ success: true, data: { id: result.insertId, payment_number: paymentNumber } });
+    const paymentId = result.insertId;
+
+    // Get payment details with expense account information for journal entry
+    const [paymentDetails] = await db.query(`
+      SELECT ep.*, ed.amount as expense_amount, s.company_name as supplier_name,
+             ei.expense_account_id, coa.account_name as expense_account_name
+      FROM expense_payments ep
+      JOIN expense_details ed ON ep.expense_detail_id = ed.id
+      JOIN expense_items ei ON ed.journal_entry_id = ei.journal_entry_id
+      JOIN chart_of_accounts coa ON ei.expense_account_id = coa.id
+      JOIN suppliers s ON ep.supplier_id = s.id
+      WHERE ep.id = ?
+      LIMIT 1
+    `, [paymentId]);
+
+    if (paymentDetails.length === 0) {
+      await db.query('ROLLBACK');
+      return res.status(404).json({ success: false, error: 'Payment details not found' });
+    }
+
+    const payment = paymentDetails[0];
+    const entryNumber = `JE${Date.now()}`;
+    const description = `Payment to ${payment.supplier_name} - ${payment.reference || paymentNumber}`;
+
+    // Create journal entry for the payment
+    const [journalResult] = await db.query(`
+      INSERT INTO journal_entries (
+        entry_number, entry_date, reference, description, 
+        total_debit, total_credit, status, created_by
+      ) VALUES (?, ?, ?, ?, ?, ?, 'posted', ?)
+    `, [
+      entryNumber,
+      payment_date,
+      reference || paymentNumber,
+      description,
+      amount,
+      amount,
+      createdBy
+    ]);
+
+    const paymentJournalEntryId = journalResult.insertId;
+
+    // Create journal entry lines
+    // Line 1: Debit Expense Account (Accounts Payable)
+    await db.query(`
+      INSERT INTO journal_entry_lines (
+        journal_entry_id, account_id, description, debit_amount, credit_amount, line_number
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      paymentJournalEntryId,
+      payment.expense_account_id,
+      `Payment to ${payment.supplier_name}`,
+      amount,
+      0,
+      1
+    ]);
+
+    // Line 2: Credit Bank/Cash Account
+    await db.query(`
+      INSERT INTO journal_entry_lines (
+        journal_entry_id, account_id, description, debit_amount, credit_amount, line_number
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `, [
+      paymentJournalEntryId,
+      account_id,
+      `Payment to ${payment.supplier_name}`,
+      0,
+      amount,
+      2
+    ]);
+
+    // Note: payment_journal_entry_id column may not exist in all databases
+    // If the migration has been run, we could store the payment journal entry ID here
+    // For now, the payment is confirmed and the journal entry is created, which is sufficient
+
+    // Commit transaction
+    await db.query('COMMIT');
+
+    res.status(201).json({ success: true, data: { id: paymentId, payment_number: paymentNumber } });
   } catch (error) {
+    await db.query('ROLLBACK');
     console.error('Error creating expense payment:', error);
     res.status(500).json({ success: false, error: 'Failed to create expense payment' });
   }
@@ -1829,12 +1913,9 @@ const updateExpensePaymentStatus = async (req, res) => {
           2
         ]);
 
-        // Update expense payment with journal entry ID
-        await db.query(`
-          UPDATE expense_payments 
-          SET journal_entry_id = ? 
-          WHERE id = ?
-        `, [journalEntryId, id]);
+        // Note: payment_journal_entry_id column may not exist in all databases
+        // If the migration has been run, we could store the payment journal entry ID here
+        // For now, the payment is confirmed and the journal entry is created, which is sufficient
       }
 
       // Commit transaction
