@@ -203,7 +203,7 @@ const getAllMerchandise = async (req, res) => {
     const { page = 1, limit = 10, search = '', category_id } = req.query;
     const offset = (page - 1) * limit;
     
-    let whereClause = 'WHERE m.is_active = TRUE';
+    let whereClause = 'WHERE m.is_active = 1';
     let params = [];
     
     if (search) {
@@ -355,7 +355,7 @@ const updateMerchandise = async (req, res) => {
     
     // Check if merchandise exists
     const [existing] = await db.execute(
-      'SELECT id FROM merchandise WHERE id = ? AND is_active = TRUE',
+      'SELECT id FROM merchandise WHERE id = ? AND is_active = 1',
       [id]
     );
     
@@ -404,7 +404,7 @@ const deleteMerchandise = async (req, res) => {
     
     // Check if merchandise exists
     const [existing] = await db.execute(
-      'SELECT id FROM merchandise WHERE id = ? AND is_active = TRUE',
+      'SELECT id FROM merchandise WHERE id = ? AND is_active = 1',
       [id]
     );
     
@@ -451,7 +451,7 @@ const addStock = async (req, res) => {
     
     // Check if merchandise exists
     const [merchandise] = await db.execute(
-      'SELECT id FROM merchandise WHERE id = ? AND is_active = TRUE',
+      'SELECT id FROM merchandise WHERE id = ? AND is_active = 1',
       [merchandise_id]
     );
     
@@ -589,7 +589,7 @@ const addBulkStock = async (req, res) => {
     for (const item of items) {
       // Check if stock record already exists for this merchandise and store
       const [existingStock] = await db.execute(
-        'SELECT id, quantity FROM merchandise_stock WHERE merchandise_id = ? AND store_id = ? AND is_active = TRUE',
+        'SELECT id, quantity FROM merchandise_stock WHERE merchandise_id = ? AND store_id = ? AND is_active = 1',
         [item.merchandise_id, store_id]
       );
 
@@ -674,7 +674,7 @@ const getCurrentStock = async (req, res) => {
   try {
     const { merchandise_id, store_id } = req.query;
     
-    let whereClause = 'WHERE ms.is_active = TRUE';
+    let whereClause = 'WHERE ms.is_active = 1';
     let params = [];
     
     if (merchandise_id) {
@@ -687,7 +687,7 @@ const getCurrentStock = async (req, res) => {
       params.push(store_id);
     }
     
-    // Get current stock with merchandise and store details
+    // Get current stock with merchandise and store details from merchandise_stock table
     const [rows] = await db.execute(
       `SELECT ms.merchandise_id, ms.store_id, ms.quantity, 
               m.name as merchandise_name, s.store_name
@@ -758,17 +758,36 @@ const getLedger = async (req, res) => {
 const getAssignments = async (req, res) => {
   try {
     const [rows] = await db.execute(
-      `SELECT ma.*, m.name as merchandise_name, s.name as staff_name, s.empl_no
+      `SELECT ma.*, 
+              m.name as merchandise_name, 
+              m.id as merchandise_id_from_join,
+              s.name as staff_name, 
+              s.empl_no,
+              s.id as staff_id_from_join
        FROM merchandise_assignments ma 
        LEFT JOIN merchandise m ON ma.merchandise_id = m.id 
        LEFT JOIN staff s ON ma.staff_id = s.id 
-       WHERE ma.is_active = TRUE 
+       WHERE ma.is_active = 1 
        ORDER BY ma.date_assigned DESC`
     );
     
+    // Format the response to include nested objects for frontend compatibility
+    const formattedRows = rows.map(row => ({
+      ...row,
+      merchandise: row.merchandise_name ? {
+        id: row.merchandise_id_from_join,
+        name: row.merchandise_name
+      } : null,
+      staff: row.staff_name ? {
+        id: row.staff_id_from_join,
+        name: row.staff_name,
+        empl_no: row.empl_no
+      } : null
+    }));
+    
     res.json({
       success: true,
-      data: rows
+      data: formattedRows
     });
   } catch (error) {
     console.error('Error fetching merchandise assignments:', error);
@@ -793,18 +812,71 @@ const createAssignment = async (req, res) => {
 
     const { merchandise_id, staff_id, quantity_assigned, date_assigned, comment } = req.body;
     
-    // Check if merchandise exists
-    const [merchandise] = await db.execute(
-      'SELECT id FROM merchandise WHERE id = ? AND is_active = TRUE',
-      [merchandise_id]
-    );
+    console.log('Creating assignment with data:', { 
+      merchandise_id, 
+      merchandise_id_type: typeof merchandise_id,
+      staff_id, 
+      quantity_assigned, 
+      date_assigned 
+    });
     
-    if (merchandise.length === 0) {
+    // Validate merchandise_id
+    if (!merchandise_id || merchandise_id === 0 || merchandise_id === '0') {
       return res.status(400).json({
         success: false,
-        error: 'Merchandise not found'
+        error: 'Invalid merchandise ID provided'
       });
     }
+    
+    // Convert merchandise_id to integer to ensure proper type
+    const merchandiseIdInt = parseInt(merchandise_id, 10);
+    if (isNaN(merchandiseIdInt) || merchandiseIdInt <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid merchandise ID: ${merchandise_id}`
+      });
+    }
+    
+    // Check if merchandise exists and is active
+    // MySQL BOOLEAN is stored as TINYINT: 1 = TRUE, 0 = FALSE
+    // Using is_active = 1 instead of is_active = TRUE for better compatibility
+    console.log(`Checking merchandise with ID: ${merchandiseIdInt} (type: ${typeof merchandiseIdInt})`);
+    
+    const [merchandise] = await db.execute(
+      'SELECT id, name, is_active FROM merchandise WHERE id = ? AND is_active = 1',
+      [merchandiseIdInt]
+    );
+    
+    console.log('Merchandise check result:', merchandise.length, 'found for id:', merchandiseIdInt);
+    
+    if (merchandise.length === 0) {
+      // Check if merchandise exists but is inactive
+      const [inactiveCheck] = await db.execute(
+        'SELECT id, name, is_active FROM merchandise WHERE id = ?',
+        [merchandiseIdInt]
+      );
+      
+      if (inactiveCheck.length > 0) {
+        console.log('Merchandise found but inactive:', inactiveCheck[0]);
+        return res.status(400).json({
+          success: false,
+          error: `Merchandise "${inactiveCheck[0].name || 'Unknown'}" (ID: ${merchandiseIdInt}) is inactive`
+        });
+      }
+      
+      // List available merchandise IDs for debugging
+      const [allActive] = await db.execute(
+        'SELECT id, name FROM merchandise WHERE is_active = 1 ORDER BY id LIMIT 10'
+      );
+      console.log('Available active merchandise IDs:', allActive.map(m => ({ id: m.id, name: m.name })));
+      
+      return res.status(400).json({
+        success: false,
+        error: `Merchandise not found (ID: ${merchandiseIdInt}). Please select a valid merchandise item from the dropdown.`
+      });
+    }
+    
+    console.log('Merchandise found and active:', merchandise[0]);
     
     // Check if staff exists
     const [staff] = await db.execute(
@@ -819,26 +891,162 @@ const createAssignment = async (req, res) => {
       });
     }
     
-    // Create assignment
-    const [result] = await db.execute(
-      'INSERT INTO merchandise_assignments (merchandise_id, staff_id, quantity_assigned, date_assigned, comment) VALUES (?, ?, ?, ?, ?)',
-      [merchandise_id, staff_id, quantity_assigned, date_assigned, comment]
+    // Convert staff_id and quantity_assigned to integers
+    const staffIdInt = parseInt(staff_id, 10);
+    const quantityInt = parseInt(quantity_assigned, 10);
+    
+    if (isNaN(staffIdInt) || staffIdInt <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid staff ID: ${staff_id}`
+      });
+    }
+    
+    if (isNaN(quantityInt) || quantityInt <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid quantity: ${quantity_assigned}`
+      });
+    }
+    
+    // Check available stock from merchandise_stock table only
+    // Since assignments reduce stock directly, we only need to check merchandise_stock
+    const [stockRows] = await db.execute(
+      `SELECT SUM(quantity) as total_stock 
+       FROM merchandise_stock 
+       WHERE merchandise_id = ? AND is_active = 1 AND quantity > 0`,
+      [merchandiseIdInt]
     );
     
-    // Get the created assignment with details
-    const [newAssignment] = await db.execute(
-      `SELECT ma.*, m.name as merchandise_name, s.name as staff_name, s.empl_no
-       FROM merchandise_assignments ma 
-       LEFT JOIN merchandise m ON ma.merchandise_id = m.id 
-       LEFT JOIN staff s ON ma.staff_id = s.id 
-       WHERE ma.id = ?`,
-      [result.insertId]
-    );
+    const availableStock = stockRows[0]?.total_stock || 0;
     
-    res.status(201).json({
-      success: true,
-      data: newAssignment[0]
-    });
+    if (availableStock < quantityInt) {
+      return res.status(400).json({
+        success: false,
+        error: `Insufficient stock. Available: ${availableStock}, Requested: ${quantityInt}`
+      });
+    }
+    
+    // Get connection for transaction
+    const connection = await db.getConnection();
+    
+    try {
+      await connection.beginTransaction();
+      
+      // Get stock records ordered by received_date (FIFO) to reduce from oldest stock first
+      const [stockRecords] = await connection.execute(
+        `SELECT id, store_id, quantity 
+         FROM merchandise_stock 
+         WHERE merchandise_id = ? AND is_active = 1 AND quantity > 0
+         ORDER BY received_date ASC, id ASC`,
+        [merchandiseIdInt]
+      );
+      
+      if (stockRecords.length === 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          error: 'No stock records found for this merchandise'
+        });
+      }
+      
+      // Reduce stock from stores (FIFO - First In First Out)
+      let remainingToReduce = quantityInt;
+      const stockUpdates = [];
+      const ledgerEntryIds = [];
+      
+      for (const stockRecord of stockRecords) {
+        if (remainingToReduce <= 0) break;
+        
+        const reduceAmount = Math.min(remainingToReduce, stockRecord.quantity);
+        const newQuantity = stockRecord.quantity - reduceAmount;
+        
+        // Update stock
+        await connection.execute(
+          'UPDATE merchandise_stock SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [newQuantity, stockRecord.id]
+        );
+        
+        // Create ledger entry for this store
+        const [ledgerResult] = await connection.execute(
+          `INSERT INTO merchandise_ledger 
+           (merchandise_id, store_id, transaction_type, quantity, balance_after, reference_id, reference_type, notes, created_by) 
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            merchandiseIdInt,
+            stockRecord.store_id,
+            'ISSUE',
+            reduceAmount,
+            newQuantity,
+            null, // Will be set after assignment is created
+            'STOCK_ISSUE',
+            `Assigned to staff (ID: ${staffIdInt})${comment ? ` - ${comment}` : ''}`,
+            req.user?.id || 1
+          ]
+        );
+        
+        ledgerEntryIds.push(ledgerResult.insertId);
+        
+        stockUpdates.push({
+          store_id: stockRecord.store_id,
+          reduced: reduceAmount,
+          remaining: newQuantity
+        });
+        
+        remainingToReduce -= reduceAmount;
+      }
+      
+      if (remainingToReduce > 0) {
+        await connection.rollback();
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient stock available. Could only reduce ${quantityInt - remainingToReduce} out of ${quantityInt} requested.`
+        });
+      }
+      
+      // Create assignment
+      const [result] = await connection.execute(
+        'INSERT INTO merchandise_assignments (merchandise_id, staff_id, quantity_assigned, date_assigned, comment) VALUES (?, ?, ?, ?, ?)',
+        [merchandiseIdInt, staffIdInt, quantityInt, date_assigned, comment || null]
+      );
+      
+      const assignmentId = result.insertId;
+      
+      // Update ledger entries with assignment reference
+      if (ledgerEntryIds.length > 0) {
+        const placeholders = ledgerEntryIds.map(() => '?').join(',');
+        await connection.execute(
+          `UPDATE merchandise_ledger 
+           SET reference_id = ?, notes = CONCAT(COALESCE(notes, ''), ' - Assignment ID: ', ?)
+           WHERE id IN (${placeholders})`,
+          [assignmentId, assignmentId, ...ledgerEntryIds]
+        );
+      }
+      
+      // Commit transaction
+      await connection.commit();
+      
+      // Get the created assignment with details
+      const [newAssignment] = await db.execute(
+        `SELECT ma.*, m.name as merchandise_name, s.name as staff_name, s.empl_no
+         FROM merchandise_assignments ma 
+         LEFT JOIN merchandise m ON ma.merchandise_id = m.id 
+         LEFT JOIN staff s ON ma.staff_id = s.id 
+         WHERE ma.id = ?`,
+        [assignmentId]
+      );
+      
+      res.status(201).json({
+        success: true,
+        data: newAssignment[0],
+        stockUpdates: stockUpdates
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     console.error('Error creating merchandise assignment:', error);
     res.status(500).json({
@@ -891,6 +1099,160 @@ const updateAssignment = async (req, res) => {
     res.status(500).json({
       success: false,
       error: 'Failed to update merchandise assignment'
+    });
+  }
+};
+
+// Return merchandise to stock from assignment
+const returnToStock = async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        details: errors.array()
+      });
+    }
+
+    const assignmentId = parseInt(req.params.id, 10);
+    const { store_id, quantity_returned, notes } = req.body;
+    const received_by = req.user?.id || 1;
+
+    if (isNaN(assignmentId) || assignmentId <= 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid assignment ID'
+      });
+    }
+
+    // Get assignment details
+    const [assignment] = await db.execute(
+      `SELECT ma.*, m.name as merchandise_name 
+       FROM merchandise_assignments ma 
+       LEFT JOIN merchandise m ON ma.merchandise_id = m.id 
+       WHERE ma.id = ? AND ma.is_active = 1`,
+      [assignmentId]
+    );
+
+    if (assignment.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Assignment not found or inactive'
+      });
+    }
+
+    const assignmentData = assignment[0];
+    const quantityReturnedInt = parseInt(quantity_returned, 10);
+    const storeIdInt = parseInt(store_id, 10);
+
+    if (quantityReturnedInt > assignmentData.quantity_assigned) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot return more than assigned quantity (${assignmentData.quantity_assigned})`
+      });
+    }
+
+    // Get connection for transaction
+    const connection = await db.getConnection();
+
+    try {
+      await connection.beginTransaction();
+
+      // Check if stock record exists for this merchandise and store
+      const [existingStock] = await connection.execute(
+        'SELECT id, quantity FROM merchandise_stock WHERE merchandise_id = ? AND store_id = ? AND is_active = 1',
+        [assignmentData.merchandise_id, storeIdInt]
+      );
+
+      let stockRecord;
+      let newQuantity;
+
+      if (existingStock.length > 0) {
+        // Update existing stock record
+        newQuantity = existingStock[0].quantity + quantityReturnedInt;
+        await connection.execute(
+          'UPDATE merchandise_stock SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [newQuantity, existingStock[0].id]
+        );
+        
+        const [updatedStock] = await connection.execute(
+          'SELECT * FROM merchandise_stock WHERE id = ?',
+          [existingStock[0].id]
+        );
+        stockRecord = updatedStock[0];
+      } else {
+        // Create new stock record
+        const [result] = await connection.execute(
+          'INSERT INTO merchandise_stock (merchandise_id, store_id, quantity, received_by, notes) VALUES (?, ?, ?, ?, ?)',
+          [assignmentData.merchandise_id, storeIdInt, quantityReturnedInt, received_by, notes || `Returned from assignment ID: ${assignmentId}`]
+        );
+        
+        const [newStock] = await connection.execute(
+          'SELECT * FROM merchandise_stock WHERE id = ?',
+          [result.insertId]
+        );
+        stockRecord = newStock[0];
+        newQuantity = quantityReturnedInt;
+      }
+
+      // Create ledger entry
+      await connection.execute(
+        `INSERT INTO merchandise_ledger 
+         (merchandise_id, store_id, transaction_type, quantity, balance_after, reference_id, reference_type, notes, created_by) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          assignmentData.merchandise_id,
+          storeIdInt,
+          'RECEIVE',
+          quantityReturnedInt,
+          newQuantity,
+          assignmentId,
+          'STOCK_RECEIPT',
+          `Returned from assignment (ID: ${assignmentId})${notes ? ` - ${notes}` : ''}`,
+          received_by
+        ]
+      );
+
+      // Update assignment - reduce quantity or deactivate if fully returned
+      if (quantityReturnedInt >= assignmentData.quantity_assigned) {
+        // Fully returned - deactivate assignment
+        await connection.execute(
+          'UPDATE merchandise_assignments SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [assignmentId]
+        );
+      } else {
+        // Partially returned - reduce quantity
+        const remainingQuantity = assignmentData.quantity_assigned - quantityReturnedInt;
+        await connection.execute(
+          'UPDATE merchandise_assignments SET quantity_assigned = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [remainingQuantity, assignmentId]
+        );
+      }
+
+      await connection.commit();
+
+      res.status(200).json({
+        success: true,
+        message: `Successfully returned ${quantityReturnedInt} items to stock`,
+        data: {
+          assignment_id: assignmentId,
+          quantity_returned: quantityReturnedInt,
+          stock_record: stockRecord,
+          assignment_remaining: quantityReturnedInt >= assignmentData.quantity_assigned ? 0 : assignmentData.quantity_assigned - quantityReturnedInt
+        }
+      });
+    } catch (error) {
+      await connection.rollback();
+      throw error;
+    } finally {
+      connection.release();
+    }
+  } catch (error) {
+    console.error('Error returning merchandise to stock:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to return merchandise to stock'
     });
   }
 };
@@ -952,5 +1314,6 @@ module.exports = {
   getAssignments,
   createAssignment,
   updateAssignment,
-  deleteAssignment
+  deleteAssignment,
+  returnToStock
 };

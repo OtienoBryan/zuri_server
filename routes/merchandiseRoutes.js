@@ -128,25 +128,30 @@ router.post('/categories', validateCategory, merchandiseController.createCategor
 router.put('/categories/:id', validateCategory, merchandiseController.updateCategory);
 router.delete('/categories/:id', merchandiseController.deleteCategory);
 
-// Merchandise routes
-router.get('/', merchandiseController.getAllMerchandise);
-router.get('/:id', merchandiseController.getMerchandiseById);
-router.post('/', validateMerchandise, merchandiseController.createMerchandise);
-router.put('/:id', validateMerchandise, merchandiseController.updateMerchandise);
-router.delete('/:id', merchandiseController.deleteMerchandise);
-
-// Stock routes
+// Stock routes (must be before /:id route to avoid route conflicts)
 router.post('/stock', validateStock, merchandiseController.addStock);
 router.post('/stock/bulk', validateBulkStock, merchandiseController.addBulkStock);
 router.get('/stock', merchandiseController.getStockHistory);
 router.get('/stock/current', merchandiseController.getCurrentStock);
 router.get('/ledger', merchandiseController.getLedger);
 
-// Assignment routes
+// Assignment routes (must be before /:id route to avoid route conflicts)
 router.get('/assignments', merchandiseController.getAssignments);
 router.post('/assignments', validateAssignment, merchandiseController.createAssignment);
 router.put('/assignments/:id', validateAssignment, merchandiseController.updateAssignment);
 router.delete('/assignments/:id', merchandiseController.deleteAssignment);
+router.post('/assignments/:id/return', [
+  body('store_id').isInt({ min: 1 }).withMessage('Store ID must be a positive integer'),
+  body('quantity_returned').isInt({ min: 1 }).withMessage('Quantity returned must be a positive integer'),
+  body('notes').optional().trim().isLength({ max: 500 }).withMessage('Notes must be less than 500 characters')
+], merchandiseController.returnToStock);
+
+// Merchandise routes (/:id must be last to avoid conflicts with specific routes)
+router.get('/', merchandiseController.getAllMerchandise);
+router.get('/:id', merchandiseController.getMerchandiseById);
+router.post('/', validateMerchandise, merchandiseController.createMerchandise);
+router.put('/:id', validateMerchandise, merchandiseController.updateMerchandise);
+router.delete('/:id', merchandiseController.deleteMerchandise);
 
 
 module.exports = router;
