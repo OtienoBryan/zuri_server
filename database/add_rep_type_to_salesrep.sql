@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS rep_type (
 INSERT IGNORE INTO rep_type (name, description) VALUES
 ('Retail', 'Retail sales representative'),
 ('Key Account', 'Key account sales representative'),
-('Distributor', 'Distributor sales representative');
+('Distributor', 'Distributor sales representative'),
+('HQ', 'Headquarters staff');
 
 -- Add rep_type_id column to SalesRep table if it doesn't exist
 -- Check if column exists before adding (MySQL doesn't support IF NOT EXISTS for ALTER TABLE)

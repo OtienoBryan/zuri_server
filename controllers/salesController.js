@@ -190,6 +190,11 @@ exports.createSalesRep = async (req, res) => {
       });
     }
     
+    // Hash the default password "password"
+    const bcrypt = require('bcryptjs');
+    const defaultPassword = 'password';
+    const hashedPassword = await bcrypt.hash(defaultPassword, 10);
+    
     // Check if rep_type_id column exists
     let hasRepType = false;
     try {
@@ -205,10 +210,31 @@ exports.createSalesRep = async (req, res) => {
       hasRepType = false;
     }
     
+    // Check if password column exists
+    let hasPassword = false;
+    try {
+      const [columns] = await db.query(`
+        SELECT COUNT(*) as count 
+        FROM information_schema.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() 
+        AND TABLE_NAME = 'SalesRep' 
+        AND COLUMN_NAME = 'password'
+      `);
+      hasPassword = columns[0].count > 0;
+    } catch (checkErr) {
+      hasPassword = false;
+    }
+    
     let insertQuery, insertParams;
-    if (hasRepType) {
+    if (hasRepType && hasPassword) {
+      insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, rep_type_id, password, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
+      insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue, rep_type_id || null, hashedPassword];
+    } else if (hasRepType) {
       insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, rep_type_id, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
       insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue, rep_type_id || null];
+    } else if (hasPassword) {
+      insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, password, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
+      insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue, hashedPassword];
     } else {
       insertQuery = 'INSERT INTO SalesRep (name, email, phoneNumber, country, region, route_name_update, photoUrl, status, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, 1, NOW(), NOW())';
       insertParams = [name, email, phoneNumber, country, region, routeName, photoUrlValue];

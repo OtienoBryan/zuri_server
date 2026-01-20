@@ -34,9 +34,9 @@ const journeyPlanController = {
         console.log('No date filter provided, defaulting to current date:', today);
       }
       
-      // Check if we need detailed records (for visit details modal)
-      const { userId: requestedUserId } = req.query;
-      const needDetails = requestedUserId !== undefined;
+      // Check if we need detailed records (for visit details modal or map view)
+      const { userId: requestedUserId, needDetails: needDetailsParam } = req.query;
+      const needDetails = requestedUserId !== undefined || needDetailsParam === 'true';
       
       // Group by sales rep and date, showing first checkInTime and last checkoutTime
       // Exclude records where status = 0 (Pending)
@@ -45,28 +45,59 @@ const journeyPlanController = {
       let query = '';
       
       if (needDetails) {
-        // Return individual records for visit details modal
-        query = `
-          SELECT 
-                 jp.id,
-                 DATE(jp.date) as date,
-                 jp.userId,
-                 jp.checkInTime,
-                 jp.checkoutTime,
-                 jp.imageUrl,
-                 jp.latitude,
-                 jp.longitude,
-                 sr.name as user_name,
-                 c.name as client_name,
-                 c.name as client_company_name,
-                 c.name as outlet_address_name
-          FROM JourneyPlan jp
-          LEFT JOIN SalesRep sr ON jp.userId = sr.id
-          LEFT JOIN locations c ON jp.clientId = c.id
-          ${whereClause} AND jp.userId = ?
-          ORDER BY jp.checkInTime ASC
-        `;
-        params.push(requestedUserId);
+        // Return individual records for visit details modal or map view
+        if (requestedUserId) {
+          // For specific user (visit details modal)
+          query = `
+            SELECT 
+                   jp.id,
+                   DATE(jp.date) as date,
+                   jp.userId,
+                   jp.checkInTime,
+                   jp.checkoutTime,
+                   jp.imageUrl,
+                   jp.latitude,
+                   jp.outlet_address as outlet_address_name,
+                   jp.longitude,
+                   sr.name as user_name,
+                   sr.rep_type_id,
+                   rt.name as rep_type_name,
+                   c.name as client_name,
+                   c.name as client_company_name
+            FROM JourneyPlan jp
+            LEFT JOIN SalesRep sr ON jp.userId = sr.id
+            LEFT JOIN rep_type rt ON sr.rep_type_id = rt.id
+            LEFT JOIN Clients c ON jp.clientId = c.id
+            ${whereClause} AND jp.userId = ?
+            ORDER BY jp.checkInTime ASC
+          `;
+          params.push(requestedUserId);
+        } else {
+          // For all users (map view)
+          query = `
+            SELECT 
+                   jp.id,
+                   DATE(jp.date) as date,
+                   jp.userId,
+                   jp.checkInTime,
+                   jp.checkoutTime,
+                   jp.imageUrl,
+                   jp.latitude,
+                   jp.outlet_address as outlet_address_name,
+                   jp.longitude,
+                   sr.name as user_name,
+                   sr.rep_type_id,
+                   rt.name as rep_type_name,
+                   c.name as client_name,
+                   c.name as client_company_name
+            FROM JourneyPlan jp
+            LEFT JOIN SalesRep sr ON jp.userId = sr.id
+            LEFT JOIN rep_type rt ON sr.rep_type_id = rt.id
+            LEFT JOIN Clients c ON jp.clientId = c.id
+            ${whereClause}
+            ORDER BY jp.checkInTime ASC
+          `;
+        }
       } else {
         // Return grouped summary data
         query = `
@@ -74,13 +105,17 @@ const journeyPlanController = {
                  DATE(jp.date) as date,
                  jp.userId,
                  sr.name as user_name,
+                 sr.rep_type_id,
+                 rt.name as rep_type_name,
                  MIN(jp.checkInTime) as first_checkInTime,
                  MAX(jp.checkoutTime) as last_checkoutTime,
-                 COUNT(jp.id) as total_visits
+                 COUNT(jp.id) as total_visits,
+                 MIN(jp.outlet_address) as outlet_address_name
           FROM JourneyPlan jp
           LEFT JOIN SalesRep sr ON jp.userId = sr.id
+          LEFT JOIN rep_type rt ON sr.rep_type_id = rt.id
           ${whereClause}
-          GROUP BY DATE(jp.date), jp.userId, sr.name
+          GROUP BY DATE(jp.date), jp.userId, sr.name, sr.rep_type_id, rt.name
           ORDER BY DATE(jp.date) DESC, sr.name ASC
         `;
       }

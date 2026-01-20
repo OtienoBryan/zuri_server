@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS rep_type (
 INSERT IGNORE INTO rep_type (name, description) VALUES
 ('Retail', 'Retail sales representative'),
 ('Key Account', 'Key account sales representative'),
-('Distributor', 'Distributor sales representative');
+('Distributor', 'Distributor sales representative'),
+('HQ', 'Headquarters staff');
 
 -- Add rep_type_id column to SalesRep table (run this manually if column doesn't exist)
 -- ALTER TABLE SalesRep ADD COLUMN rep_type_id INT NULL;
