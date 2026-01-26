@@ -16,7 +16,7 @@ const leaveRequestController = {
       res.status(500).json({ message: 'Failed to fetch leave requests', error: error.message });
     }
   },
-
+ 
   // Get all employee leaves (with leave type name)
   getEmployeeLeaves: async (req, res) => {
     try {

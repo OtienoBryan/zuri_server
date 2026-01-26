@@ -232,7 +232,9 @@ const storeController = {
     try {
       const [rows] = await connection.query(`
         SELECT 
+          si.id,
           si.store_id as store_id,
+          si.product_id as product_id,
           s.store_name,
           s.store_code,
           p.product_name,

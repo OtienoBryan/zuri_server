@@ -1275,10 +1275,11 @@ app.get('/api/availability-countries', async (req, res) => {
     // Try to query the table, return empty array if table doesn't exist
     try {
       const sql = `
-        SELECT DISTINCT COALESCE(NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name, ar.outlet_id
+        SELECT DISTINCT COALESCE(NULLIF(c.name, ''), NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name, ar.outlet_id
         FROM \`asset_report\` ar
+        LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
         LEFT JOIN \`locations\` l ON ar.outlet_id = l.id
-        WHERE (l.name IS NOT NULL AND l.name != '') OR (ar.outlet IS NOT NULL AND ar.outlet != '')
+        WHERE (c.name IS NOT NULL AND c.name != '') OR (l.name IS NOT NULL AND l.name != '') OR (ar.outlet IS NOT NULL AND ar.outlet != '')
         ORDER BY outlet_name ASC
       `;
       

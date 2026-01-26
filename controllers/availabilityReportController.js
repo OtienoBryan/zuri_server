@@ -53,18 +53,20 @@ exports.getAllAvailabilityReports = async (req, res) => {
     const isViewAll = parseInt(limit) === -1;
     const offset = isViewAll ? 0 : (parseInt(page) - 1) * parseInt(limit);
     
-    // Query asset_report table with locations join
+    // Query asset_report table with Clients and locations join
     let sql = `
       SELECT ar.id, ar.admin_id, ar.asset_id, ar.asset_name, ar.quantity, 
              ar.outlet_id, ar.outlet, ar.merchandiser, ar.role, ar.region,
              ar.created_date, ar.month, ar.year,
-             COALESCE(NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name
+             COALESCE(NULLIF(c.name, ''), NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name
       FROM \`asset_report\` ar
+      LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
       LEFT JOIN \`locations\` l ON ar.outlet_id = l.id
     `;
     let countSql = `
       SELECT COUNT(*) as total
       FROM \`asset_report\` ar
+      LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
       LEFT JOIN \`locations\` l ON ar.outlet_id = l.id
     `;
     const params = [];
@@ -105,16 +107,16 @@ exports.getAllAvailabilityReports = async (req, res) => {
     }
     
     if (outlet && outlet !== 'all') {
-      whereConditions.push(`(l.name LIKE ? OR ar.outlet LIKE ?)`);
-      params.push(`%${outlet}%`, `%${outlet}%`);
-      countParams.push(`%${outlet}%`, `%${outlet}%`);
+      whereConditions.push(`(c.name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ?)`);
+      params.push(`%${outlet}%`, `%${outlet}%`, `%${outlet}%`);
+      countParams.push(`%${outlet}%`, `%${outlet}%`, `%${outlet}%`);
     }
     
     if (search && search.trim()) {
       const searchTerm = `%${search.trim()}%`;
-      whereConditions.push(`(ar.asset_name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ? OR ar.quantity LIKE ?)`);
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
-      countParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      whereConditions.push(`(ar.asset_name LIKE ? OR c.name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ? OR ar.quantity LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
+      countParams.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     if (whereConditions.length > 0) {
@@ -164,8 +166,9 @@ exports.exportAvailabilityReportsCSV = async (req, res) => {
       SELECT ar.id, ar.admin_id, ar.asset_id, ar.asset_name, ar.quantity, 
              ar.outlet_id, ar.outlet, ar.merchandiser, ar.role, ar.region,
              ar.created_date, ar.month, ar.year,
-             COALESCE(NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name
+             COALESCE(NULLIF(c.name, ''), NULLIF(l.name, ''), NULLIF(ar.outlet, ''), 'Unknown') AS outlet_name
       FROM \`asset_report\` ar
+      LEFT JOIN \`Clients\` c ON ar.outlet_id = c.id
       LEFT JOIN \`locations\` l ON ar.outlet_id = l.id
     `;
     const params = [];
@@ -198,14 +201,14 @@ exports.exportAvailabilityReportsCSV = async (req, res) => {
     }
     
     if (outlet && outlet !== 'all') {
-      whereConditions.push(`(l.name LIKE ? OR ar.outlet LIKE ?)`);
-      params.push(`%${outlet}%`, `%${outlet}%`);
+      whereConditions.push(`(c.name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ?)`);
+      params.push(`%${outlet}%`, `%${outlet}%`, `%${outlet}%`);
     }
     
     if (search && search.trim()) {
       const searchTerm = `%${search.trim()}%`;
-      whereConditions.push(`(ar.asset_name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ? OR ar.quantity LIKE ?)`);
-      params.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      whereConditions.push(`(ar.asset_name LIKE ? OR c.name LIKE ? OR l.name LIKE ? OR ar.outlet LIKE ? OR ar.quantity LIKE ?)`);
+      params.push(searchTerm, searchTerm, searchTerm, searchTerm, searchTerm);
     }
     
     if (whereConditions.length > 0) {
