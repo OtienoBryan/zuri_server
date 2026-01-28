@@ -7,14 +7,16 @@ const pool = mysql.createPool({
   password: process.env.DB_PASSWORD || '',
   database: process.env.DB_NAME || 'retail_finance',
   waitForConnections: true,
-  connectionLimit: 5, // Reduced for serverless
+  connectionLimit: 10, // Increased for better concurrency
   queueLimit: 0,
-  acquireTimeout: 60000, // 60 seconds
-  timeout: 60000, // 60 seconds
+  acquireTimeout: 30000, // 30 seconds (reduced from 60)
+  timeout: 30000, // 30 seconds query timeout (reduced from 60)
   reconnect: true,
   ssl: false, // Temporarily disable SSL to test connection
   timezone: '+00:00', // Force UTC timezone
-  dateStrings: true // Return dates as strings to avoid timezone conversion
+  dateStrings: true, // Return dates as strings to avoid timezone conversion
+  enableKeepAlive: true, // Keep connections alive
+  keepAliveInitialDelay: 0
 });
 
 // Test database connection and set timezone

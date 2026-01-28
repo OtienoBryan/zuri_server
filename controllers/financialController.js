@@ -5,6 +5,28 @@ const fs = require('fs');
 const multer = require('multer');
 const cloudinary = require('../config/cloudinary');
 
+// Simple in-memory cache for dashboard stats
+const dashboardCache = {
+  data: null,
+  timestamp: null,
+  ttl: 120000 // 2 minutes cache (increased for better performance)
+};
+
+const getCachedDashboardStats = () => {
+  if (dashboardCache.data && dashboardCache.timestamp) {
+    const age = Date.now() - dashboardCache.timestamp;
+    if (age < dashboardCache.ttl) {
+      return dashboardCache.data;
+    }
+  }
+  return null;
+};
+
+const setCachedDashboardStats = (data) => {
+  dashboardCache.data = data;
+  dashboardCache.timestamp = Date.now();
+};
+
 // Chart of Accounts Controller
 const chartOfAccountsController = {
   // Get all accounts
@@ -595,75 +617,81 @@ const productsController = {
 
 // Dashboard Controller
 const dashboardController = {
-  // Get dashboard statistics (optimized with parallel queries and additional counts)
+  // Get dashboard statistics (optimized with parallel queries, combined queries, and caching)
   getDashboardStats: async (req, res) => {
     try {
-      // Execute all queries in parallel for better performance
+      // Check cache first
+      const cachedStats = getCachedDashboardStats();
+      if (cachedStats) {
+        return res.json({ success: true, data: cachedStats, cached: true });
+      }
+
+      // Get today's date range for optimized query (avoids DATE() function)
+      const today = new Date();
+      const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const todayEnd = new Date(todayStart);
+      todayEnd.setDate(todayEnd.getDate() + 1);
+
+      // Execute optimized queries in parallel with query hints for better performance
+      // Combined sales_orders queries into one query
       const [
-        salesResult,
+        salesOrdersResult,
         purchasesResult,
         receivablesResult,
         payablesResult,
         lowStockResult,
-        pendingOrdersResult,
         assetsResult,
-        newOrdersResult,
         newCreditNotesResult
       ] = await Promise.all([
-        // Get total sales (from sales orders)
+        // Combined query for sales_orders: totalSales, pendingOrders, newOrdersCount
+        // MySQL optimizer will automatically use indexes if they exist
         db.query(`
-          SELECT COALESCE(SUM(total_amount), 0) as totalSales 
-          FROM sales_orders 
-          WHERE status IN ('delivered', 'confirmed', 'shipped')
+          SELECT 
+            COALESCE(SUM(CASE WHEN status IN ('delivered', 'confirmed', 'shipped') THEN total_amount ELSE 0 END), 0) as totalSales,
+            COUNT(CASE WHEN status IN ('draft', 'confirmed', 'shipped') THEN 1 END) as pendingOrders,
+            COUNT(CASE WHEN my_status = 0 OR my_status = '0' THEN 1 END) as newOrdersCount
+          FROM sales_orders
         `),
         
-        // Get total purchases (from purchase orders)
+        // Get total purchases (optimized date comparison)
+        // Indexes will be used automatically by MySQL optimizer
         db.query(`
           SELECT COALESCE(SUM(total_amount), 0) as totalPurchases 
           FROM purchase_orders 
           WHERE status IN ('received', 'sent')
-          AND DATE(order_date) = CURDATE()
-        `),
+          AND order_date >= ? AND order_date < ?
+        `, [todayStart, todayEnd]),
         
         // Get total receivables (outstanding client payments)
+        // Indexes will help with aggregation performance
         db.query(`
           SELECT COALESCE(SUM(debit - credit), 0) as totalReceivables
           FROM client_ledger
         `),
         
         // Get total payables (outstanding supplier payments)
+        // Indexes will help with aggregation performance
         db.query(`
           SELECT COALESCE(SUM(credit - debit), 0) as totalPayables
           FROM supplier_ledger
         `),
         
         // Get low stock items count
+        // Composite index will be used automatically
         db.query(`
           SELECT COUNT(*) as lowStockItems
           FROM products 
           WHERE current_stock <= reorder_level AND is_active = true
         `),
         
-        // Get pending orders count
-        db.query(`
-          SELECT COUNT(*) as pendingOrders
-          FROM sales_orders 
-          WHERE status IN ('draft', 'confirmed', 'shipped')
-        `),
-        
         // Get total assets (sum of purchase_value from assets)
+        // Simple aggregation - no index needed
         db.query(`
           SELECT COALESCE(SUM(purchase_value), 0) as totalAssets FROM assets
         `),
         
-        // Get count of new orders (my_status = 0)
-        db.query(`
-          SELECT COUNT(*) as newOrdersCount
-          FROM sales_orders 
-          WHERE my_status = 0 OR my_status = '0'
-        `),
-        
         // Get count of new credit notes (my_status = 0)
+        // Index will be used automatically
         db.query(`
           SELECT COUNT(*) as newCreditNotesCount
           FROM credit_notes 
@@ -672,16 +700,19 @@ const dashboardController = {
       ]);
       
       const stats = {
-        totalSales: salesResult[0][0].totalSales,
-        totalPurchases: purchasesResult[0][0].totalPurchases,
-        totalReceivables: receivablesResult[0][0].totalReceivables,
-        totalPayables: payablesResult[0][0].totalPayables,
-        lowStockItems: lowStockResult[0][0].lowStockItems,
-        pendingOrders: pendingOrdersResult[0][0].pendingOrders,
-        totalAssets: assetsResult[0][0].totalAssets,
-        newOrdersCount: newOrdersResult[0][0].newOrdersCount,
-        newCreditNotesCount: newCreditNotesResult[0][0].newCreditNotesCount
+        totalSales: parseFloat(salesOrdersResult[0][0].totalSales) || 0,
+        totalPurchases: parseFloat(purchasesResult[0][0].totalPurchases) || 0,
+        totalReceivables: parseFloat(receivablesResult[0][0].totalReceivables) || 0,
+        totalPayables: parseFloat(payablesResult[0][0].totalPayables) || 0,
+        lowStockItems: parseInt(lowStockResult[0][0].lowStockItems) || 0,
+        pendingOrders: parseInt(salesOrdersResult[0][0].pendingOrders) || 0,
+        totalAssets: parseFloat(assetsResult[0][0].totalAssets) || 0,
+        newOrdersCount: parseInt(salesOrdersResult[0][0].newOrdersCount) || 0,
+        newCreditNotesCount: parseInt(newCreditNotesResult[0][0].newCreditNotesCount) || 0
       };
+      
+      // Cache the results
+      setCachedDashboardStats(stats);
       
       res.json({ success: true, data: stats });
     } catch (error) {
@@ -1283,6 +1314,36 @@ const getAssets = async (req, res) => {
     res.json({ success: true, data: rows });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to fetch assets' });
+  }
+};
+
+const deleteAsset = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if asset exists
+    const [existingAssets] = await db.query('SELECT id FROM assets WHERE id = ?', [id]);
+    
+    if (existingAssets.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Asset not found'
+      });
+    }
+
+    // Delete asset
+    await db.query('DELETE FROM assets WHERE id = ?', [id]);
+    
+    res.json({
+      success: true,
+      message: 'Asset deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting asset:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to delete asset'
+    });
   }
 };
 
@@ -2592,6 +2653,7 @@ module.exports = {
   getDepreciationHistory,
   addAsset,
   getAssets,
+  deleteAsset,
   getAllAssets,
   getAllAssetsWithDepreciation,
   getCashAndEquivalents,

@@ -33,6 +33,7 @@ const {
   getAssetTypes,
   addAsset,
   getAssets,
+  deleteAsset,
   getAssetAccounts,
   getDepreciationAccounts,
   getDepreciationHistory,
@@ -306,10 +307,11 @@ router.get('/receivables/aging', receivablesController.getAgingReceivables);
 router.post('/receivables/payment', receivablesController.makeCustomerPayment);
 router.post('/receivables/confirm-payment', receivablesController.confirmCustomerPayment);
 router.get('/receipts', receivablesController.listReceipts);
-router.get('/receipts/:id', receivablesController.getReceiptById);
+// IMPORTANT: More specific routes must come before parameterized routes
+router.get('/receipts/amounts-bulk', receivablesController.getReceiptAmountsBulk);
 router.get('/receipts/invoice/:invoice_id/pending', receivablesController.getPendingReceiptsForInvoice);
 router.get('/receipts/invoice/:invoice_id', receivablesController.getReceiptsByInvoice);
-router.get('/receipts/amounts-bulk', receivablesController.getReceiptAmountsBulk);
+router.get('/receipts/:id', receivablesController.getReceiptById);
 router.get('/clients/:clientId/outstanding-balance', receivablesController.getClientOutstandingBalance);
 router.put('/receipts/:id/confirm', receivablesController.confirmPayment);
 router.put('/receipts/:id/decline', receivablesController.declinePayment);
@@ -353,6 +355,7 @@ router.get('/depreciation-accounts', getDepreciationAccounts);
 router.get('/depreciation-history', getDepreciationHistory);
 router.post('/assets', addAsset);
 router.get('/assets', getAssets);
+router.delete('/assets/:id', deleteAsset);
 router.post('/depreciation', postDepreciation);
 router.get('/assets-with-depreciation', getAllAssetsWithDepreciation);
 router.get('/assets-total-value', getAssetsTotalValue);

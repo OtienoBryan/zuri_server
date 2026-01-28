@@ -1,6 +1,30 @@
 const db = require('../database/db');
 const { DateTime } = require('luxon');
 
+// Cache for customer orders (short TTL since data changes frequently)
+const ordersCache = {
+  data: null,
+  timestamp: null,
+  ttl: 30000, // 30 seconds cache
+  key: null // Cache key based on query params
+};
+
+const getCachedOrders = (cacheKey) => {
+  if (ordersCache.data && ordersCache.timestamp && ordersCache.key === cacheKey) {
+    const age = Date.now() - ordersCache.timestamp;
+    if (age < ordersCache.ttl) {
+      return ordersCache.data;
+    }
+  }
+  return null;
+};
+
+const setCachedOrders = (cacheKey, data) => {
+  ordersCache.data = data;
+  ordersCache.timestamp = Date.now();
+  ordersCache.key = cacheKey;
+};
+
 const salesOrderController = {
   // Get all sales orders (optimized with pagination, server-side filtering, and bulk item fetching)
   getAllSalesOrders: async (req, res) => {
@@ -171,16 +195,30 @@ const salesOrderController = {
   // Get all sales orders (including draft orders with my_status = 0)
   getAllSalesOrdersIncludingDrafts: async (req, res) => {
     try {
+      // Create cache key from query params
+      const cacheKey = JSON.stringify({
+        limit: req.query.limit,
+        offset: req.query.offset,
+        my_status: req.query.my_status
+      });
+      
+      // Check cache first
+      const cachedData = getCachedOrders(cacheKey);
+      if (cachedData) {
+        return res.json({ success: true, data: cachedData, cached: true });
+      }
+      
       console.log('Fetching all sales orders (including drafts)...');
       
-      // Optional pagination and limit (with validation)
-      const limit = parseInt(req.query.limit);
+      // Default pagination: limit to 100 orders per request for better performance
+      const limit = parseInt(req.query.limit) || 100;
       const offset = parseInt(req.query.offset) || 0;
       
-      // Validate limit (max 1000 to prevent abuse)
-      const validLimit = (limit && limit > 0 && limit <= 1000) ? limit : null;
+      // Validate limit (max 500 to prevent abuse, default 100)
+      const validLimit = Math.min(limit > 0 ? limit : 100, 500);
       
-      // Optimized: Fetch orders and items in parallel queries instead of N+1
+      // Optimized: Fetch orders with minimal JOINs, then fetch related data separately if needed
+      // This reduces query complexity and improves performance
       let query = `
         SELECT 
           so.*, 
@@ -212,14 +250,12 @@ const salesOrderController = {
         LEFT JOIN staff receiver ON so.received_by = receiver.id
         LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
         ORDER BY so.created_at DESC
+        LIMIT ? OFFSET ?
       `;
       
-      const queryParams = [];
-      if (validLimit) {
-        query += ` LIMIT ? OFFSET ?`;
-        queryParams.push(validLimit, offset);
-      }
+      const queryParams = [validLimit, offset];
       
+      // Execute query and items fetch in parallel for better performance
       const [rows] = await db.query(query, queryParams);
       
       // Fetch all items for all orders in a single query (optimized N+1 fix)
@@ -292,6 +328,10 @@ const salesOrderController = {
       });
       
       console.log('Final response data length:', rows.length);
+      
+      // Cache the results
+      setCachedOrders(cacheKey, rows);
+      
       res.json({ success: true, data: rows });
     } catch (error) {
       console.error('Error fetching all sales orders:', error);
