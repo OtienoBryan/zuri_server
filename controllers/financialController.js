@@ -2629,7 +2629,18 @@ const getProductsSaleReport = async (req, res) => {
     const [rows] = await db.query(query, params);
     console.log('Products sale report result:', rows.length, 'products');
 
-    res.json({ success: true, data: rows });
+    // Transform data to ensure numeric values are numbers, not strings
+    const transformedData = rows.map(row => ({
+      ...row,
+      total_quantity: parseFloat(row.total_quantity) || 0,
+      total_amount: parseFloat(row.total_amount) || 0,
+      total_orders: parseInt(row.total_orders) || 0,
+      average_price: parseFloat(row.average_price) || 0
+    }));
+
+    console.log('Sample transformed product:', transformedData[0]);
+
+    res.json({ success: true, data: transformedData });
   } catch (error) {
     console.error('Error fetching products sale report:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch products sale report' });
