@@ -221,7 +221,7 @@ const salesOrderController = {
       // This reduces query complexity and improves performance
       let query = `
         SELECT 
-          so.*, 
+          so.*,
           COALESCE(c.name, so.name) as customer_name, 
           COALESCE(c.phone, so.phone) as customer_phone,
           COALESCE(c.address, so.address) as customer_address,
@@ -237,7 +237,8 @@ const salesOrderController = {
           r.name as rider_name,
           r.contact as rider_contact,
           receiver.name as received_by_name,
-          cc.code as cylinder_code
+          cc.code as cylinder_code,
+          COALESCE(SUM(CASE WHEN rec.status = 'confirmed' THEN rec.amount ELSE 0 END), 0) as amount_paid
         FROM sales_orders so
         LEFT JOIN Clients c ON so.customer_id = c.id
         LEFT JOIN outlet_categories oc ON c.client_type = oc.id
@@ -249,6 +250,10 @@ const salesOrderController = {
         LEFT JOIN Riders r ON so.rider_id = r.id
         LEFT JOIN staff receiver ON so.received_by = receiver.id
         LEFT JOIN cylinder_codes cc ON so.cylinder_code_id = cc.id
+        LEFT JOIN receipts rec ON CAST(rec.invoice_number AS UNSIGNED) = so.id AND rec.status = 'confirmed'
+        GROUP BY so.id, c.name, c.phone, c.address, c.balance, c.client_type, oc.name, 
+                 c.outlet_account, oa.name, u.full_name, sr.name, sr_region.name, sr.region, 
+                 rt.name, r.name, r.contact, receiver.name, cc.code
         ORDER BY so.created_at DESC
         LIMIT ? OFFSET ?
       `;
@@ -257,6 +262,14 @@ const salesOrderController = {
       
       // Execute query and items fetch in parallel for better performance
       const [rows] = await db.query(query, queryParams);
+      
+      console.log('Sample order after query (before payment calc):', {
+        id: rows[0]?.id,
+        so_number: rows[0]?.so_number,
+        amount_paid: rows[0]?.amount_paid,
+        net_price: rows[0]?.net_price,
+        total_amount: rows[0]?.total_amount
+      });
       
       // Fetch all items for all orders in a single query (optimized N+1 fix)
       if (rows.length > 0) {
@@ -325,6 +338,31 @@ const salesOrderController = {
           address: order.customer_address || order.address || null,
           balance: order.customer_balance || null
         };
+        
+        // Calculate payment status based on amount paid vs net_price
+        const netPrice = parseFloat(order.net_price) || parseFloat(order.total_amount) || 0;
+        const amountPaid = parseFloat(order.amount_paid) || 0;
+        
+        if (amountPaid === 0) {
+          order.payment_status = 'unpaid';
+        } else if (amountPaid >= netPrice) {
+          order.payment_status = 'paid';
+        } else {
+          order.payment_status = 'partially paid';
+        }
+        
+        // Log first order for debugging
+        if (order.id === rows[0]?.id) {
+          console.log('First order payment status calculation:', {
+            orderId: order.id,
+            soNumber: order.so_number,
+            netPrice,
+            totalAmount: order.total_amount,
+            amountPaid,
+            payment_status: order.payment_status,
+            rawAmountPaid: order.amount_paid
+          });
+        }
       });
       
       console.log('Final response data length:', rows.length);
