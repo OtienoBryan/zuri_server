@@ -202,26 +202,40 @@ const salesOrderController = {
         my_status: req.query.my_status
       });
       
+      // Temporarily disable cache to debug limit issue
       // Check cache first
       const cachedData = getCachedOrders(cacheKey);
-      if (cachedData) {
+      if (cachedData && false) { // Disabled cache temporarily
+        console.log('Returning cached orders data:', {
+          cacheKey,
+          dataLength: cachedData.length,
+          cached: true
+        });
         return res.json({ success: true, data: cachedData, cached: true });
       }
       
       console.log('Fetching all sales orders (including drafts)...');
+      console.log('Cache key:', cacheKey);
       
       // Default pagination: limit to 100 orders per request for better performance
       const limit = parseInt(req.query.limit) || 100;
       const offset = parseInt(req.query.offset) || 0;
       
-      // Validate limit (max 500 to prevent abuse, default 100)
-      const validLimit = Math.min(limit > 0 ? limit : 100, 500);
+      // Validate limit (max 10000 to allow fetching all orders, default 100)
+      const validLimit = Math.min(limit > 0 ? limit : 100, 10000);
+      
+      console.log('Fetch orders params:', {
+        requestedLimit: req.query.limit,
+        parsedLimit: limit,
+        validLimit: validLimit,
+        offset: offset
+      });
       
       // Optimized: Fetch orders with minimal JOINs, then fetch related data separately if needed
       // This reduces query complexity and improves performance
       let query = `
         SELECT 
-          so.*,
+          so.*, 
           COALESCE(c.name, so.name) as customer_name, 
           COALESCE(c.phone, so.phone) as customer_phone,
           COALESCE(c.address, so.address) as customer_address,
